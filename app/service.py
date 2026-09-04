@@ -578,6 +578,10 @@ class BotService:
         )
 
     async def show_content(self, event: IncomingEvent, kind: str, offset: int = 0) -> None:
+        # Old Telegram/MAX messages used content:interviews for this menu item.
+        # Keep them useful while switching the source to the site's /videos page.
+        if kind == "interviews":
+            kind = "videos"
         if kind not in CONTENT_LABELS or kind == "all":
             kind = "latest"
         user = self.storage.get_user(event.platform, event.user_id) or {}
@@ -1956,7 +1960,7 @@ class BotService:
         )
         buttons = [
             [Button("Отключить" if item["is_active"] else "Включить", callback=f"adm:toggle:{admin_id}")],
-            [Button("Подключить вторую платформу", callback=f"adm:link:{admin_id}")],
+            [Button("Подключить MAX бот", callback=f"adm:link:{admin_id}")],
             [Button("Назад", callback="admins:list")],
         ]
         await self.send(
@@ -1979,8 +1983,8 @@ class BotService:
         await self.send(
             event,
             OutgoingMessage(
-                f"<b>Код для второй платформы</b>\n\n<code>{token}</code>\n\n"
-                "Откройте другой бот и отправьте ему эту команду:\n"
+                f"<b>Код для подключения MAX бота</b>\n\n<code>{token}</code>\n\n"
+                "Откройте MAX бот и отправьте ему эту команду:\n"
                 f"<code>/start {token}</code>\n\nКод одноразовый и действует 30 минут.",
                 [[Button("Назад", callback=f"adm:view:{admin_id}")]],
             ),

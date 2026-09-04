@@ -18,10 +18,11 @@ class SiteApiError(RuntimeError):
 
 class SiteClient:
     def __init__(self, base_url: str, key_id: str, secret: str) -> None:
+        self._site_base_url = base_url.rstrip("/")
         self._key_id = key_id
         self._secret = secret.encode()
         self._client = httpx.AsyncClient(
-            base_url=f"{base_url}/api/integrations/bot",
+            base_url=f"{self._site_base_url}/api/integrations/bot",
             timeout=httpx.Timeout(20.0, connect=7.0),
         )
 
@@ -112,9 +113,57 @@ class SiteClient:
         return await self._request("POST", "/requests/link", body=body)
 
     async def content(self, kind: str, *, limit: int = 6, offset: int = 0, city: str = "") -> dict[str, Any]:
+        if kind == "videos":
+            return await self.videos(limit=limit, offset=offset)
         return await self._request(
             "GET", f"/content/{quote(kind, safe='')}", params={"limit": limit, "offset": offset, "city": city}
         )
+
+    async def videos(self, *, limit: int = 6, offset: int = 0) -> dict[str, Any]:
+        try:
+            response = await self._client.get(f"{self._site_base_url}/api/videos")
+        except httpx.HTTPError as exc:
+            raise SiteApiError("Сайт временно недоступен. Попробуйте ещё раз позже.") from exc
+        if response.is_error:
+            raise SiteApiError("Не удалось загрузить новые выпуски", response.status_code)
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise SiteApiError("Сайт вернул некорректный список выпусков") from exc
+        if not isinstance(payload, list):
+            raise SiteApiError("Сайт вернул некорректный список выпусков")
+
+        start = max(0, offset)
+        size = max(1, limit)
+        rows = payload[start : start + size]
+        items = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            slug = str(row.get("slug") or "").strip()
+            if not slug:
+                continue
+            items.append(
+                {
+                    "id": str(row.get("id") or slug),
+                    "kind": "videos",
+                    "slug": slug,
+                    "title": str(row.get("name") or row.get("title") or "Новый выпуск"),
+                    "subtitle": row.get("description") or row.get("title") or None,
+                    "image": row.get("coverImage") or None,
+                    "path": f"/videos?play={quote(slug, safe='')}",
+                    "publishedAt": None,
+                    "city": None,
+                }
+            )
+        return {
+            "items": items,
+            "pagination": {
+                "limit": size,
+                "offset": start,
+                "hasMore": start + size < len(payload),
+            },
+        }
 
     async def cities(self) -> list[dict[str, Any]]:
         return await self._request("GET", "/cities")

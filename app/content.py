@@ -87,6 +87,7 @@ for _kind, _title in (
     ("businesses", "Бизнес"),
     ("articles", "Журнал"),
     ("interviews", "Выпуски"),
+    ("videos", "Новые выпуски"),
     ("reels", "Короткие видео"),
 ):
     CONTENT_CATALOG += (
@@ -96,7 +97,7 @@ for _kind, _title in (
 
 
 # Feature keys are deliberately independent from button positions and message text.
-# This lets an owner hide a feature and also reject callbacks from old messages.
+# This lets an administrator hide a feature and also reject callbacks from old messages.
 FEATURE_DEFINITIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("application", "Заявка на участие", ("apply:",)),
     ("catalog", "Каталог материалов", ("content:",)),

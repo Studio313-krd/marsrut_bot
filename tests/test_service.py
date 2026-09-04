@@ -37,6 +37,7 @@ class FakeMessenger(Messenger):
 class FakeSite:
     def __init__(self) -> None:
         self.created: dict[str, Any] | None = None
+        self.content_kinds: list[str] = []
 
     async def requests(self, **filters: Any) -> dict[str, Any]:
         del filters
@@ -49,6 +50,11 @@ class FakeSite:
     async def add_activity(self, request_id: str, body: dict[str, Any]) -> dict[str, Any]:
         del request_id, body
         return {}
+
+    async def content(self, kind: str, **filters: Any) -> dict[str, Any]:
+        del filters
+        self.content_kinds.append(kind)
+        return {"items": [], "pagination": {"total": 0, "hasMore": False}}
 
 
 def settings(path: Path) -> Settings:
@@ -196,6 +202,19 @@ async def test_disabled_feature_rejects_callback_from_old_message(tmp_path) -> N
 
     assert messenger.messages[-1].content_key == "system.feature_disabled"
     assert storage.conversation(Platform.TELEGRAM, "100") is None
+
+
+@pytest.mark.asyncio
+async def test_old_interviews_button_uses_videos_source(tmp_path) -> None:
+    storage = Storage(tmp_path / "bot.sqlite3")
+    storage.initialize()
+    messenger = FakeMessenger()
+    site = FakeSite()
+    service = BotService(settings(tmp_path / "bot.sqlite3"), storage, site, {Platform.TELEGRAM: messenger})  # type: ignore[arg-type]
+
+    await service.handle(incoming(1, callback="content:interviews:0"))
+
+    assert site.content_kinds == ["videos"]
 
 
 @pytest.mark.asyncio

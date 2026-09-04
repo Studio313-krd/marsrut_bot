@@ -20,6 +20,7 @@ CONTENT_LABELS = {
     "businesses": "Бизнес",
     "articles": "Журнал",
     "interviews": "Выпуски",
+    "videos": "Новые выпуски",
     "reels": "Короткие видео",
     "all": "Все публикации",
 }
@@ -65,7 +66,7 @@ def user_menu(*, is_admin: bool, city_name: str | None = None) -> OutgoingMessag
     buttons = [
         [Button("Стать героем", callback="apply:start")],
         [
-            Button("Новые выпуски", callback="content:interviews:0"),
+            Button("Новые выпуски", callback="content:videos:0"),
             Button("Герои", callback="content:entrepreneurs:0"),
         ],
         [Button("Бизнес", callback="content:businesses:0"), Button("Журнал", callback="content:articles:0")],
@@ -315,7 +316,7 @@ def editable_default_messages(privacy_url: str, site_url: str) -> list[OutgoingM
         request_card(sample_request, admin=True),
         admin_menu({status: 0 for status in STATUS_LABELS}),
     ]
-    for kind in ("latest", "entrepreneurs", "businesses", "articles", "interviews", "reels"):
+    for kind in ("latest", "entrepreneurs", "businesses", "articles", "interviews", "videos", "reels"):
         messages.append(content_list(kind, [], site_url, 0, False))
         messages.append(
             content_list(

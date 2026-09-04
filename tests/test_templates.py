@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.templates import content_list
+from app.templates import content_list, user_menu
 
 
 def content_item(*, title: str, subtitle: str) -> dict[str, str]:
@@ -58,3 +58,10 @@ def test_catalog_button_title_fits_platform_limit() -> None:
     assert label.startswith("Открыть Очень длинное название")
     assert label.endswith("…")
     assert len(label) <= 64
+
+
+def test_new_releases_button_opens_videos_catalog() -> None:
+    message = user_menu(is_admin=False)
+
+    new_releases = next(button for row in message.buttons for button in row if button.text == "Новые выпуски")
+    assert new_releases.callback == "content:videos:0"
