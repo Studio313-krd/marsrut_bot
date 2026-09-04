@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
-from html import escape
+from html import escape, unescape
 from typing import Any
 
 from app.domain import Button, OutgoingMessage
@@ -27,6 +28,26 @@ ROLE_LABELS = {"OWNER": "Владелец", "ADMIN": "Администратор
 
 def safe(value: Any) -> str:
     return escape(str(value or ""), quote=False)
+
+
+def plain_text(value: Any) -> str:
+    """Convert optional CMS HTML into compact text suitable for a bot message or button."""
+    text = unescape(str(value or ""))
+    text = re.sub(r"<\s*br\s*/?\s*>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</\s*(?:p|div|li|h[1-6])\s*>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"[ \t\f\v]+", " ", text)
+    text = re.sub(r"\s*\n\s*", "\n", text)
+    return text.strip()
+
+
+def open_content_button(title: Any, index: int) -> str:
+    prefix = "Открыть "
+    clean_title = plain_text(title) or f"материал {index}"
+    available = 64 - len(prefix)
+    if len(clean_title) > available:
+        clean_title = f"{clean_title[: available - 1].rstrip()}…"
+    return f"{prefix}{clean_title}"
 
 
 def format_datetime(value: str | None) -> str:
@@ -204,13 +225,14 @@ def content_list(
     lines = [f"<b>{safe(label)}</b>", ""]
     buttons: list[list[Button]] = []
     for index, item in enumerate(items, 1):
-        subtitle = safe(item.get("subtitle"))
-        lines.append(f"<b>{index}. {safe(item.get('title'))}</b>")
-        if subtitle:
-            lines.append(subtitle[:220])
+        title = plain_text(item.get("title")) or "Без названия"
+        subtitle = plain_text(item.get("subtitle"))
+        lines.append(f"<b>{index}. {safe(title)}</b>")
+        if kind != "reels" and subtitle:
+            lines.append(safe(subtitle[:220]))
         lines.append("")
         url = f"{site_url}{item['path']}"
-        buttons.append([Button(f"Открыть {index}", url=url)])
+        buttons.append([Button(open_content_button(title, index), url=url)])
     navigation: list[Button] = []
     if offset > 0:
         navigation.append(Button("Назад", callback=f"content:{kind}:{max(0, offset - len(items))}"))
