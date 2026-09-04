@@ -1,0 +1,5 @@
+-r requirements.txt
+pytest>=8.4,<10
+pytest-asyncio>=1.1,<2
+respx>=0.22,<1
+ruff>=0.12,<1

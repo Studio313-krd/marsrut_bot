@@ -1,0 +1,23 @@
+[Unit]
+Description=Marshrut Postroen Telegram and MAX bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=marsrut-bot
+Group=marsrut-bot
+WorkingDirectory=/opt/marsrut-bot
+EnvironmentFile=/opt/marsrut-bot/.env
+ExecStart=/opt/marsrut-bot/.venv/bin/python /opt/marsrut-bot/run.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/marsrut-bot/data /opt/marsrut-bot/logs /opt/marsrut-bot/backups
+
+[Install]
+WantedBy=multi-user.target
