@@ -41,7 +41,17 @@ _APPLICATION_STEPS = ["name", "company", "position", "phone", "email", "message"
 _MUTATING_ROLES = {AdminRole.OWNER.value, AdminRole.ADMIN.value}
 
 
+def _ensure_home_navigation(message: OutgoingMessage) -> None:
+    """Ensure every non-home response has an obvious escape route."""
+    if message.content_key == "main.menu":
+        return
+    if any(button.callback == "menu" for row in message.buttons for button in row):
+        return
+    message.buttons.append([Button("Главное меню", callback="menu")])
+
+
 def outgoing_to_dict(message: OutgoingMessage) -> dict[str, Any]:
+    _ensure_home_navigation(message)
     _ensure_content_identity(message)
     return {
         "text": message.text,
@@ -133,6 +143,7 @@ class BotService:
         self._rate_windows: dict[tuple[Platform, str], deque[float]] = defaultdict(deque)
         self.storage.seed_content_catalog(list(CONTENT_CATALOG))
         for message in editable_default_messages(settings.privacy_url, settings.site_public_url):
+            _ensure_home_navigation(message)
             self.storage.customize_message(message)
 
     def bootstrap_owners(self) -> None:
@@ -142,12 +153,14 @@ class BotService:
             self.storage.ensure_owner(Platform.MAX, user_id)
 
     async def send(self, event: IncomingEvent, message: OutgoingMessage) -> None:
+        _ensure_home_navigation(message)
         _ensure_content_identity(message)
         await self.messengers[event.platform].send(event.chat_id, self.storage.customize_message(message))
 
     async def send_to(self, platform: Platform, recipient_id: str, message: OutgoingMessage) -> None:
         messenger = self.messengers.get(platform)
         if messenger:
+            _ensure_home_navigation(message)
             _ensure_content_identity(message)
             await messenger.send(recipient_id, self.storage.customize_message(message))
 
@@ -184,8 +197,11 @@ class BotService:
                 logger.warning("Could not acknowledge callback", exc_info=True)
 
         text = (event.text or "").strip()
-        if text.startswith("/start"):
-            payload = text.partition(" ")[2].strip()
+        command_token, separator, command_payload = text.partition(" ")
+        command = command_token.split("@", 1)[0].casefold() if command_token.startswith("/") else ""
+        normalized_text = text.casefold()
+        if command == "/start":
+            payload = command_payload.strip() if separator else ""
             if payload:
                 redeemed = self.storage.redeem_invite(payload, event)
                 if redeemed:
@@ -221,11 +237,16 @@ class BotService:
             self.storage.clear_conversation(event.platform, event.user_id)
             await self.show_menu(event)
             return
-        if text in {"/menu", "меню", "Главное меню"} or event.callback == "menu":
+        if command == "/menu" or normalized_text in {"меню", "главное меню"} or event.callback == "menu":
             self.storage.clear_conversation(event.platform, event.user_id)
             await self.show_menu(event)
             return
-        if text == "/cancel" or event.callback == "flow:cancel":
+        conversation = self.storage.conversation(event.platform, event.user_id)
+        if (
+            command == "/cancel"
+            or event.callback == "flow:cancel"
+            or (conversation and normalized_text in {"отменить", "отмена"})
+        ):
             self.storage.clear_conversation(event.platform, event.user_id)
             await self.send(
                 event,
@@ -239,10 +260,17 @@ class BotService:
                 ),
             )
             return
-        if text in {"/admin", "админ"} or event.callback == "admin:home":
+        if conversation and normalized_text == "назад":
+            if conversation["flow"] == "application":
+                await self.application_back(event)
+            else:
+                self.storage.clear_conversation(event.platform, event.user_id)
+                await self.show_menu(event)
+            return
+        if command == "/admin" or normalized_text == "админ" or event.callback == "admin:home":
             await self.show_admin_home(event)
             return
-        if text == "/delete_my_data":
+        if command == "/delete_my_data":
             if self.storage.feature_enabled("data_deletion"):
                 await self.confirm_delete_data(event)
             else:
@@ -259,11 +287,35 @@ class BotService:
             return
 
         if event.callback:
-            await self.handle_callback(event, event.callback)
+            try:
+                await self.handle_callback(event, event.callback)
+            except (KeyError, SiteApiError, ValueError) as exc:
+                logger.info("User callback could not be completed: %s", type(exc).__name__)
+                await self.send(
+                    event,
+                    OutgoingMessage(
+                        "Не удалось выполнить действие. Возможно, данные изменились или кнопка устарела. "
+                        "Вернитесь в главное меню и попробуйте снова.",
+                        content_key="system.action_error",
+                        content_title="Не удалось выполнить действие",
+                        content_category="system",
+                    ),
+                )
             return
-        conversation = self.storage.conversation(event.platform, event.user_id)
         if conversation:
-            await self.handle_conversation(event, conversation)
+            try:
+                await self.handle_conversation(event, conversation)
+            except (KeyError, SiteApiError, ValueError) as exc:
+                logger.info("Conversation step could not be completed: %s", type(exc).__name__)
+                await self.send(
+                    event,
+                    OutgoingMessage(
+                        "Не удалось продолжить действие. Вернитесь в главное меню и попробуйте снова.",
+                        content_key="system.action_error",
+                        content_title="Не удалось выполнить действие",
+                        content_category="system",
+                    ),
+                )
             return
         await self.show_menu(event)
 
@@ -396,6 +448,7 @@ class BotService:
     async def application_back(self, event: IncomingEvent) -> None:
         conversation = self.storage.conversation(event.platform, event.user_id)
         if not conversation or conversation["flow"] != "application":
+            await self.show_menu(event)
             return
         step = conversation["step"]
         if step == "review":
@@ -686,6 +739,7 @@ class BotService:
 
     async def confirm_cancel_request(self, event: IncomingEvent, request_id: str) -> None:
         if not await self._owned_request(event, request_id):
+            await self.send(event, OutgoingMessage("Заявка не найдена или больше недоступна."))
             return
         await self.send(
             event,
@@ -695,9 +749,9 @@ class BotService:
                     [Button("Да, отменить", callback=f"request:cancel:{request_id}")],
                     [Button("Не отменять", callback=f"request:view:{request_id}")],
                 ],
-                content_key="privacy.about",
-                content_title="О проекте",
-                content_category="privacy",
+                content_key="requests.cancel_confirm",
+                content_title="Подтверждение отмены заявки",
+                content_category="requests",
             ),
         )
 
@@ -710,7 +764,11 @@ class BotService:
         await self.send(
             event,
             OutgoingMessage(
-                "Заявка отменена и перемещена в архив.", [[Button("Мои заявки", callback="requests:mine")]]
+                "Заявка отменена и перемещена в архив.",
+                [[Button("Мои заявки", callback="requests:mine")]],
+                content_key="requests.cancelled",
+                content_title="Заявка отменена",
+                content_category="requests",
             ),
         )
 
@@ -725,8 +783,8 @@ class BotService:
                     [Button("Удалить мои данные", callback="privacy:delete-confirm")],
                     [Button("Главное меню", callback="menu")],
                 ],
-                content_key="privacy.delete_confirm",
-                content_title="Подтверждение удаления данных",
+                content_key="privacy.about",
+                content_title="О проекте",
                 content_category="privacy",
             ),
         )
@@ -740,6 +798,9 @@ class BotService:
                     [Button("Удалить мои данные", callback="privacy:delete")],
                     [Button("Отмена", callback="menu")],
                 ],
+                content_key="privacy.delete_confirm",
+                content_title="Подтверждение удаления данных",
+                content_category="privacy",
             ),
         )
 
@@ -757,7 +818,13 @@ class BotService:
             return
         self.storage.delete_user_data(event.platform, event.user_id)
         await self.send(
-            event, OutgoingMessage("Ваши данные удалены. Если захотите вернуться, снова запустите бота.")
+            event,
+            OutgoingMessage(
+                "Ваши данные удалены. Если захотите вернуться, перейдите в главное меню.",
+                content_key="privacy.deleted",
+                content_title="Данные пользователя удалены",
+                content_category="privacy",
+            ),
         )
 
     async def handle_conversation(self, event: IncomingEvent, conversation: dict[str, Any]) -> None:
@@ -789,7 +856,10 @@ class BotService:
                 event,
                 OutgoingMessage(
                     "Теперь укажите телефон из заявки.",
-                    [[Button("Поделиться контактом", kind="request_contact")]],
+                    [
+                        [Button("Поделиться контактом", kind="request_contact")],
+                        [Button("Отменить", callback="flow:cancel")],
+                    ],
                 ),
             )
             return
@@ -1633,6 +1703,7 @@ class BotService:
         admin = self.storage.admin_for(event.platform, event.user_id)
         if not admin:
             self.storage.clear_conversation(event.platform, event.user_id)
+            await self.send(event, OutgoingMessage("Доступ администратора не найден."))
             return
         text = (event.text or "").strip()
         if conversation["flow"] == "admin_search":
@@ -2019,6 +2090,16 @@ class BotService:
             caption,
         )
         self.storage.audit(admin["id"], "requests.exported", "request")
+        await self.send(
+            event,
+            OutgoingMessage(
+                "Выгрузка готова и отправлена выше.",
+                [[Button("Панель", callback="admin:home")]],
+                content_key="admin.export.completed",
+                content_title="CSV-выгрузка отправлена",
+                content_category="admin",
+            ),
+        )
 
     async def show_blocked_users(self, event: IncomingEvent, admin: dict[str, Any]) -> None:
         if admin["role"] != AdminRole.OWNER.value:
@@ -2276,6 +2357,7 @@ class BotService:
             if not messenger:
                 raise RuntimeError(f"{platform.value} is not configured")
             message = outgoing_from_dict(item["payload"])
+            _ensure_home_navigation(message)
             _ensure_content_identity(message)
             await messenger.send(str(item["recipient_id"]), self.storage.customize_message(message))
             self.storage.complete_delivery(int(item["id"]))

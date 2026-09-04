@@ -2,9 +2,11 @@
 
 `CI` runs Ruff and tests on Python 3.12 and 3.14 for every push and pull request.
 
-`Deploy production` is intentionally manual. It tests the release, creates a database backup and
-a code backup, stops only `marsrut-bot.service`, installs the update, starts the service and checks
-`http://127.0.0.1:8081/health`. If an installation or health check fails, the previous code is
+Every successful `CI` run caused by a push to `main` automatically starts `Deploy production`.
+The workflow can also be started manually as a fallback. It verifies that the release is still the
+latest `main` commit, tests it again, creates database and code backups, stops only
+`marsrut-bot.service`, installs the update, starts the service and checks
+`http://127.0.0.1:8081/health`. If installation or the health check fails, the previous code is
 restored and the service is started again.
 
 Configure these repository Actions secrets before the first deployment:
@@ -45,4 +47,5 @@ Do not add `marsrut-deploy` to the `sudo` group and do not grant it direct acces
 `tar`, `chown`, `systemctl`, shells, editors, or commands run as `marsrut-bot`. Do not store `.env`,
 bot tokens or server passwords in GitHub.
 
-Run a deployment from GitHub: **Actions → Deploy production → Run workflow**.
+Ordinary deployment requires only a push to `main`. Manual fallback: **Actions → Deploy
+production → Run workflow**.

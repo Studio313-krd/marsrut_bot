@@ -22,6 +22,10 @@ class Messenger(ABC):
         del recipient_id, filename, content, caption
         raise NotImplementedError("File sending is not supported by this adapter")
 
+    async def configure_bot(self) -> None:
+        """Configure platform-native commands and navigation when supported."""
+        return None
+
     @abstractmethod
     async def register_webhook(self, public_base_url: str, secret: str) -> None: ...
 

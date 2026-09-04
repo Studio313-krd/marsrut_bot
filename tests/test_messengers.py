@@ -3,12 +3,13 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 
 import httpx
 import pytest
 import respx
 
-from app.domain import OutgoingMessage
+from app.domain import Button, OutgoingMessage
 from app.messengers.max import MaxMessenger
 from app.messengers.telegram import TelegramMessenger
 
@@ -73,6 +74,83 @@ async def test_telegram_sends_multiple_images_before_text() -> None:
 
     assert photos.call_count == 2
     assert text.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_telegram_configures_start_command_and_menu_button() -> None:
+    commands = respx.post("https://api.telegram.org/bottoken/setMyCommands").mock(
+        return_value=httpx.Response(200, json={"ok": True, "result": True})
+    )
+    menu = respx.post("https://api.telegram.org/bottoken/setChatMenuButton").mock(
+        return_value=httpx.Response(200, json={"ok": True, "result": True})
+    )
+    messenger = TelegramMessenger("token")
+    try:
+        await messenger.configure_bot()
+    finally:
+        await messenger.close()
+
+    command_payload = json.loads(commands.calls.last.request.content)
+    menu_payload = json.loads(menu.calls.last.request.content)
+    assert command_payload == {"commands": [{"command": "start", "description": "Перейти к главной"}]}
+    assert menu_payload == {"menu_button": {"type": "commands"}}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_telegram_keeps_inline_home_button_when_reply_keyboard_is_removed() -> None:
+    sent = respx.post("https://api.telegram.org/bottoken/sendMessage").mock(
+        return_value=httpx.Response(200, json={"ok": True, "result": {}})
+    )
+    messenger = TelegramMessenger("token")
+    try:
+        await messenger.send(
+            "1",
+            OutgoingMessage(
+                "Действие отменено.",
+                [[Button("Главное меню", callback="menu")]],
+                remove_keyboard=True,
+            ),
+        )
+    finally:
+        await messenger.close()
+
+    payload = json.loads(sent.calls.last.request.content)
+    assert payload["reply_markup"] == {
+        "inline_keyboard": [[{"text": "Главное меню", "callback_data": "menu"}]]
+    }
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_telegram_contact_keyboard_has_back_cancel_and_home() -> None:
+    sent = respx.post("https://api.telegram.org/bottoken/sendMessage").mock(
+        return_value=httpx.Response(200, json={"ok": True, "result": {}})
+    )
+    messenger = TelegramMessenger("token")
+    try:
+        await messenger.send(
+            "1",
+            OutgoingMessage(
+                "Укажите телефон",
+                [
+                    [Button("Поделиться контактом", kind="request_contact")],
+                    [Button("Назад", callback="apply:back"), Button("Отменить", callback="flow:cancel")],
+                    [Button("Главное меню", callback="menu")],
+                ],
+            ),
+        )
+    finally:
+        await messenger.close()
+
+    payload = json.loads(sent.calls.last.request.content)
+    keyboard = payload["reply_markup"]["keyboard"]
+    assert keyboard == [
+        [{"text": "Поделиться контактом", "request_contact": True}],
+        [{"text": "Назад"}, {"text": "Отменить"}],
+        [{"text": "Главное меню"}],
+    ]
 
 
 @pytest.mark.asyncio

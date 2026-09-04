@@ -96,9 +96,14 @@ curl -H "X-Health-Token: $APP_SECRET" https://bot.example.ru/health/details
 ## CI/CD
 
 GitHub Actions автоматически запускает Ruff и тесты на Python 3.12 и 3.14 для каждого push и
-pull request. Production-деплой запускается вручную из Actions после настройки SSH-секретов;
-он создаёт резервные копии, обновляет только `marsrut-bot.service`, проверяет health-check и
-возвращает предыдущий код при ошибке. Настройка описана в [`.github/DEPLOYMENT.md`](.github/DEPLOYMENT.md).
+pull request. Успешный CI после push в `main` автоматически запускает production-деплой: создаёт
+резервные копии, обновляет только `marsrut-bot.service`, проверяет health-check и возвращает
+предыдущий код при ошибке. Ручной запуск оставлен как аварийный вариант. Настройка описана в
+[`.github/DEPLOYMENT.md`](.github/DEPLOYMENT.md).
+
+Telegram при запуске приложения автоматически получает системную кнопку **Menu** с командой
+`/start — Перейти к главной`. Каждый ответ бота также содержит понятный путь в главное меню;
+команды `/start`, `/menu` и `/cancel` остаются доступны вручную.
 
 ## Резервные копии
 

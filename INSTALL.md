@@ -598,6 +598,10 @@ Telegram webhook registered
 MAX webhook registered
 ```
 
+Одновременно Telegram регистрирует системную кнопку **Menu** и команду
+`/start — Перейти к главной`. В дальнейшем эта настройка также проверяется при каждом запуске
+`marsrut-bot.service`.
+
 ## 21. Проверка Telegram webhook
 
 ```bash

@@ -51,6 +51,15 @@ def build_service(settings: Settings) -> BotService:
     return service
 
 
+async def _configure_bot_interfaces(service: BotService) -> None:
+    for messenger in service.messengers.values():
+        try:
+            await messenger.configure_bot()
+        except Exception:
+            # A temporary platform API outage must not make the webhook service unavailable.
+            logger.warning("Could not configure %s bot interface", messenger.platform.value)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = load_settings()
@@ -62,6 +71,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.settings = settings
     app.state.service = service
     tasks = [
+        asyncio.create_task(_configure_bot_interfaces(service)),
         asyncio.create_task(
             _forever("site-events", settings.event_poll_interval, service.process_site_events_once)
         ),

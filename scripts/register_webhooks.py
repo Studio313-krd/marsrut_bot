@@ -15,6 +15,7 @@ async def main() -> None:
             telegram = TelegramMessenger(settings.telegram_token)
             messengers.append(telegram)
             await telegram.register_webhook(settings.public_base_url, settings.telegram_webhook_secret)
+            await telegram.configure_bot()
             print("Telegram webhook registered")
         if settings.max_enabled:
             max_messenger = MaxMessenger(settings.max_token)

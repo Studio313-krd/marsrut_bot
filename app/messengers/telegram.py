@@ -12,6 +12,12 @@ from app.messengers.base import Messenger
 
 logger = logging.getLogger(__name__)
 
+_REPLY_CALLBACK_LABELS = {
+    "menu": "Главное меню",
+    "flow:cancel": "Отменить",
+    "apply:back": "Назад",
+}
+
 
 class TelegramMessenger(Messenger):
     platform = Platform.TELEGRAM
@@ -72,6 +78,14 @@ class TelegramMessenger(Messenger):
             return {"text": button.text, "url": button.url}
         return {"text": button.text, "callback_data": button.callback or "noop"}
 
+    @staticmethod
+    def _reply_button(button: Button) -> dict[str, Any] | None:
+        if button.kind == "request_contact":
+            return {"text": button.text, "request_contact": True}
+        if button.callback in _REPLY_CALLBACK_LABELS:
+            return {"text": _REPLY_CALLBACK_LABELS[button.callback]}
+        return None
+
     async def send(self, recipient_id: str, message: OutgoingMessage) -> None:
         for image_url in message.images:
             try:
@@ -98,27 +112,26 @@ class TelegramMessenger(Messenger):
             button.kind == "request_contact" for row in message.buttons for button in row
         )
         if has_contact_button:
+            keyboard = []
+            for row in message.buttons:
+                rendered_row = [self._reply_button(button) for button in row]
+                rendered_row = [button for button in rendered_row if button]
+                if rendered_row:
+                    keyboard.append(rendered_row)
             body["reply_markup"] = {
-                "keyboard": [
-                    [
-                        {"text": button.text, "request_contact": True}
-                        for row in message.buttons
-                        for button in row
-                        if button.kind == "request_contact"
-                    ]
-                ],
+                "keyboard": keyboard,
                 "resize_keyboard": True,
                 "one_time_keyboard": True,
                 "input_field_placeholder": "Или введите номер вручную",
             }
-        elif message.remove_keyboard:
-            body["reply_markup"] = {"remove_keyboard": True}
         elif message.buttons:
             body["reply_markup"] = {
                 "inline_keyboard": [
                     [self._inline_button(button) for button in row] for row in message.buttons
                 ]
             }
+        elif message.remove_keyboard:
+            body["reply_markup"] = {"remove_keyboard": True}
         response = await self._client.post(f"{self._base_url}/sendMessage", json=body)
         if response.status_code == 400 and body.get("parse_mode"):
             fallback = dict(body)
@@ -147,6 +160,24 @@ class TelegramMessenger(Messenger):
         response.raise_for_status()
         if not response.json().get("ok"):
             raise RuntimeError("Telegram rejected document")
+
+    async def configure_bot(self) -> None:
+        requests = (
+            (
+                "setMyCommands",
+                {"commands": [{"command": "start", "description": "Перейти к главной"}]},
+            ),
+            ("setChatMenuButton", {"menu_button": {"type": "commands"}}),
+        )
+        for method, payload in requests:
+            response = await self._client.post(f"{self._base_url}/{method}", json=payload)
+            if not response.is_success:
+                raise RuntimeError(f"Telegram rejected {method} with HTTP {response.status_code}")
+            result = response.json()
+            if not result.get("ok"):
+                raise RuntimeError(
+                    f"Telegram rejected {method}: {result.get('description', 'unknown error')}"
+                )
 
     async def register_webhook(self, public_base_url: str, secret: str) -> None:
         response = await self._client.post(

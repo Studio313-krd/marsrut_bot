@@ -139,6 +139,47 @@ async def test_menu_has_no_removed_features_and_custom_page_opens(tmp_path) -> N
     assert messenger.messages[-1].buttons[-1][0].text == "Новая кнопка"
     await service.handle(incoming(3, callback=f"page:show:{page_id}"))
     assert messenger.messages[-1].text == "Новый ответ"
+    assert any(button.callback == "menu" for row in messenger.messages[-1].buttons for button in row)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_flow_always_offers_main_menu(tmp_path) -> None:
+    storage = Storage(tmp_path / "bot.sqlite3")
+    storage.initialize()
+    messenger = FakeMessenger()
+    service = BotService(
+        settings(tmp_path / "bot.sqlite3"), storage, FakeSite(), {Platform.TELEGRAM: messenger}
+    )  # type: ignore[arg-type]
+
+    await service.handle(incoming(1, callback="apply:start"))
+    await service.handle(incoming(2, callback="flow:cancel"))
+
+    message = messenger.messages[-1]
+    assert message.text == "Действие отменено."
+    assert any(button.callback == "menu" for row in message.buttons for button in row)
+    assert storage.conversation(Platform.TELEGRAM, "100") is None
+
+
+@pytest.mark.asyncio
+async def test_contact_step_has_complete_navigation(tmp_path) -> None:
+    storage = Storage(tmp_path / "bot.sqlite3")
+    storage.initialize()
+    messenger = FakeMessenger()
+    service = BotService(
+        settings(tmp_path / "bot.sqlite3"), storage, FakeSite(), {Platform.TELEGRAM: messenger}
+    )  # type: ignore[arg-type]
+
+    await service.handle(incoming(1, callback="apply:start"))
+    await service.handle(incoming(2, text="Иван Иванов"))
+    await service.handle(incoming(3, text="Проект"))
+    await service.handle(incoming(4, text="Основатель"))
+
+    callbacks = {
+        button.callback for row in messenger.messages[-1].buttons for button in row if button.callback
+    }
+    kinds = {button.kind for row in messenger.messages[-1].buttons for button in row}
+    assert "request_contact" in kinds
+    assert {"apply:back", "flow:cancel", "menu"} <= callbacks
 
 
 @pytest.mark.asyncio
