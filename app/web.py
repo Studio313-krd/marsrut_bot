@@ -47,7 +47,7 @@ def build_service(settings: Settings) -> BotService:
         site=SiteClient(settings.site_base_url, settings.bot_api_key_id, settings.bot_api_secret),
         messengers=messengers,
     )
-    service.bootstrap_owners()
+    service.bootstrap_admins()
     return service
 
 

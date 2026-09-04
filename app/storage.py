@@ -83,7 +83,7 @@ class Storage:
                 CREATE TABLE IF NOT EXISTS admins (
                     id TEXT PRIMARY KEY,
                     display_name TEXT NOT NULL,
-                    role TEXT NOT NULL CHECK(role IN ('OWNER','ADMIN','VIEWER')),
+                    role TEXT NOT NULL CHECK(role = 'ADMIN'),
                     is_active INTEGER NOT NULL DEFAULT 1,
                     created_by TEXT,
                     created_at TEXT NOT NULL,
@@ -216,6 +216,10 @@ class Storage:
                 "UPDATE delivery_queue SET status='PENDING', available_at=? WHERE status='SENDING'",
                 (iso(),),
             )
+            # Older releases had OWNER and VIEWER roles. Every existing account and
+            # unused invitation now receives the single full-access ADMIN role.
+            db.execute("UPDATE admins SET role='ADMIN' WHERE role<>'ADMIN'")
+            db.execute("UPDATE admin_invites SET role='ADMIN' WHERE role<>'ADMIN'")
 
             columns = {row[1] for row in db.execute("PRAGMA table_info(users)").fetchall()}
             if "referral" not in columns:
@@ -359,11 +363,17 @@ class Storage:
         with self._lock, self._db() as db:
             db.execute("DELETE FROM conversations WHERE platform=? AND user_id=?", (platform.value, user_id))
 
-    def ensure_owner(self, platform: Platform, user_id: str, display_name: str = "Владелец") -> None:
+    def ensure_admin(self, platform: Platform, user_id: str, display_name: str = "Администратор") -> None:
         with self._lock, self._db() as db:
-            if db.execute(
-                "SELECT 1 FROM admin_accounts WHERE platform=? AND user_id=?", (platform.value, user_id)
-            ).fetchone():
+            account = db.execute(
+                "SELECT admin_id FROM admin_accounts WHERE platform=? AND user_id=?",
+                (platform.value, user_id),
+            ).fetchone()
+            if account:
+                db.execute(
+                    "UPDATE admins SET role='ADMIN',is_active=1,updated_at=? WHERE id=?",
+                    (iso(), account["admin_id"]),
+                )
                 return
             admin_id = str(uuid.uuid4())
             now = iso()
@@ -371,7 +381,7 @@ class Storage:
             try:
                 db.execute(
                     "INSERT INTO admins(id,display_name,role,is_active,created_at,updated_at) VALUES(?,?,?,?,?,?)",
-                    (admin_id, display_name, AdminRole.OWNER.value, 1, now, now),
+                    (admin_id, display_name, AdminRole.ADMIN.value, 1, now, now),
                 )
                 db.execute(
                     "INSERT INTO admin_accounts(platform,user_id,chat_id,admin_id,linked_at) VALUES(?,?,?,?,?)",
@@ -476,24 +486,18 @@ class Storage:
                 db.execute("ROLLBACK")
                 raise
 
-    def update_admin(
-        self, admin_id: str, *, role: AdminRole | None = None, active: bool | None = None
-    ) -> bool:
+    def update_admin(self, admin_id: str, *, active: bool) -> bool:
         with self._lock, self._db() as db:
             existing = db.execute("SELECT * FROM admins WHERE id=?", (admin_id,)).fetchone()
             if not existing:
                 return False
-            if existing["role"] == AdminRole.OWNER.value and (
-                role not in {None, AdminRole.OWNER} or active is False
-            ):
-                owners = db.execute(
-                    "SELECT COUNT(*) FROM admins WHERE role='OWNER' AND is_active=1"
-                ).fetchone()[0]
-                if owners <= 1:
-                    raise ValueError("Нельзя отключить или понизить последнего владельца")
+            if active is False and existing["is_active"]:
+                active_admins = db.execute("SELECT COUNT(*) FROM admins WHERE is_active=1").fetchone()[0]
+                if active_admins <= 1:
+                    raise ValueError("Нельзя отключить последнего администратора")
             db.execute(
-                "UPDATE admins SET role=COALESCE(?,role),is_active=COALESCE(?,is_active),updated_at=? WHERE id=?",
-                (role.value if role else None, int(active) if active is not None else None, iso(), admin_id),
+                "UPDATE admins SET is_active=?,updated_at=? WHERE id=?",
+                (int(active), iso(), admin_id),
             )
             return True
 

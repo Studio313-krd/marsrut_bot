@@ -23,8 +23,8 @@
 - домен или поддомен для webhook, например `bot.example.ru`;
 - токен Telegram-бота;
 - токен прошедшего модерацию MAX-бота;
-- Telegram ID первого владельца;
-- MAX ID первого владельца;
+- Telegram ID первого администратора;
+- MAX ID первого администратора;
 - SSH-доступ к VPS бота;
 - доступ к серверу сайта и его production `.env`;
 - имя systemd-сервиса сайта.
@@ -48,7 +48,7 @@ curl "https://api.telegram.org/bot<TELEGRAM_TOKEN>/getUpdates"
 result[].message.from.id
 ```
 
-Оно будет использовано как `TELEGRAM_OWNER_IDS`.
+Оно будет использовано как `TELEGRAM_ADMIN_IDS`.
 
 ## 3. Создание MAX-бота
 
@@ -75,7 +75,7 @@ curl -s \
 user.user_id
 ```
 
-Это значение будет использовано как `MAX_OWNER_IDS`.
+Это значение будет использовано как `MAX_ADMIN_IDS`.
 
 ## 4. Настройка DNS
 
@@ -366,12 +366,12 @@ BOT_API_SECRET=<ТОТ_ЖЕ_BOT_API_SECRET_ЧТО_НА_САЙТЕ>
 TELEGRAM_BOT_TOKEN=<TELEGRAM_TOKEN>
 TELEGRAM_WEBHOOK_SECRET=<TELEGRAM_WEBHOOK_SECRET>
 TELEGRAM_BOT_USERNAME=<USERNAME_БЕЗ_СИМВОЛА_СОБАКИ>
-TELEGRAM_OWNER_IDS=<TELEGRAM_USER_ID>
+TELEGRAM_ADMIN_IDS=<TELEGRAM_USER_ID>
 
 MAX_BOT_TOKEN=<MAX_TOKEN>
 MAX_WEBHOOK_SECRET=<MAX_WEBHOOK_SECRET>
 MAX_BOT_USERNAME=<MAX_USERNAME_БЕЗ_СИМВОЛА_СОБАКИ>
-MAX_OWNER_IDS=<MAX_USER_ID>
+MAX_ADMIN_IDS=<MAX_USER_ID>
 
 EVENT_POLL_INTERVAL_SECONDS=5
 REMINDER_POLL_INTERVAL_SECONDS=60
@@ -379,11 +379,11 @@ DAILY_DIGEST_HOUR=9
 OUTBOX_RETENTION_DAYS=30
 ```
 
-Для нескольких аварийных владельцев ID перечисляются через запятую:
+Для нескольких первоначальных администраторов ID перечисляются через запятую:
 
 ```dotenv
-TELEGRAM_OWNER_IDS=123456789,987654321
-MAX_OWNER_IDS=111111111,222222222
+TELEGRAM_ADMIN_IDS=123456789,987654321
+MAX_ADMIN_IDS=111111111,222222222
 ```
 
 Ограничить доступ к конфигурации:
@@ -640,7 +640,7 @@ https://bot.example.ru/webhooks/max
 
 # Первый запуск
 
-## 23. Проверка владельца
+## 23. Проверка администратора
 
 В Telegram отправить:
 
@@ -657,7 +657,7 @@ https://bot.example.ru/webhooks/max
 
 Должна открыться панель администратора.
 
-Если показывается обычное меню, перепроверить `TELEGRAM_OWNER_IDS` и `MAX_OWNER_IDS`, затем выполнить:
+Если показывается обычное меню, перепроверить `TELEGRAM_ADMIN_IDS` и `MAX_ADMIN_IDS`, затем выполнить:
 
 ```bash
 systemctl restart marsrut-bot
@@ -665,13 +665,12 @@ systemctl restart marsrut-bot
 
 ## 24. Добавление администраторов
 
-Владелец открывает:
+Администратор открывает:
 
 ```text
 Панель администратора
 → Администраторы
-→ Добавить
-→ Выбрать роль
+→ Добавить администратора
 ```
 
 Бот создаст одноразовый код и ссылку. Будущий администратор открывает ссылку или отправляет:
@@ -704,7 +703,7 @@ systemctl restart marsrut-bot
 динамическую часть исходного ответа. В разделе «Включение возможностей» пользовательскую функцию
 можно отключить целиком; тогда исчезают её актуальные кнопки и перестают работать старые.
 
-Редактирование доступно владельцам и администраторам. Наблюдатели не видят кнопку редактора.
+Редактирование доступно всем администраторам. Других административных ролей в боте нет.
 
 # Приёмочное тестирование
 
@@ -713,7 +712,7 @@ systemctl restart marsrut-bot
 1. Отправить заявку через форму сайта.
 2. Убедиться, что сайт показал номер вида `MP-260903-ABC123`.
 3. Проверить появление заявки в web-админке.
-4. Проверить уведомление владельца в Telegram и MAX.
+4. Проверить уведомление администратора в Telegram и MAX.
 5. В боте открыть «Мои заявки → Привязать заявку с сайта».
 6. Ввести номер заявки и телефон.
 7. Создать отдельную заявку непосредственно в Telegram.

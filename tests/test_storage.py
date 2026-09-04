@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+
 from app.domain import AdminRole, Button, IncomingEvent, OutgoingMessage, Platform
 from app.storage import Storage
 
@@ -15,24 +17,59 @@ def event(user_id: str = "100") -> IncomingEvent:
     )
 
 
-def test_invite_is_single_use_and_owner_cannot_be_removed(tmp_path) -> None:
+def test_invite_is_single_use_and_last_admin_cannot_be_removed(tmp_path) -> None:
     storage = Storage(tmp_path / "bot.sqlite3")
     storage.initialize()
-    storage.ensure_owner(Platform.TELEGRAM, "1", "Владелец")
-    owner = storage.admin_for(Platform.TELEGRAM, "1")
-    assert owner and owner["role"] == "OWNER"
+    storage.ensure_admin(Platform.TELEGRAM, "1", "Первый администратор")
+    first = storage.admin_for(Platform.TELEGRAM, "1")
+    assert first and first["role"] == "ADMIN"
 
-    token = storage.create_invite(owner["id"], AdminRole.ADMIN)
+    try:
+        storage.update_admin(first["id"], active=False)
+    except ValueError as exc:
+        assert "последнего администратора" in str(exc)
+    else:
+        raise AssertionError("The last administrator must not be disabled")
+
+    token = storage.create_invite(first["id"], AdminRole.ADMIN)
     invited = storage.redeem_invite(token, event("2"))
     assert invited and invited["role"] == "ADMIN"
     assert storage.redeem_invite(token, event("3")) is None
+    assert storage.update_admin(first["id"], active=False)
+    assert storage.admin_for(Platform.TELEGRAM, "1") is None
+    assert storage.admin_for(Platform.TELEGRAM, "2")
+    storage.ensure_admin(Platform.TELEGRAM, "1")
+    assert storage.admin_for(Platform.TELEGRAM, "1")
 
-    try:
-        storage.update_admin(owner["id"], active=False)
-    except ValueError as exc:
-        assert "последнего владельца" in str(exc)
-    else:
-        raise AssertionError("The last owner must not be disabled")
+
+def test_legacy_roles_are_migrated_to_admin(tmp_path) -> None:
+    path = tmp_path / "bot.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.execute(
+            """
+            CREATE TABLE admins (
+                id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                role TEXT NOT NULL CHECK(role IN ('OWNER','ADMIN','VIEWER')),
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_by TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        db.executemany(
+            "INSERT INTO admins VALUES(?,?,?,1,NULL,?,?)",
+            [
+                ("owner", "Старый владелец", "OWNER", "now", "now"),
+                ("viewer", "Старый наблюдатель", "VIEWER", "now", "now"),
+            ],
+        )
+
+    storage = Storage(path)
+    storage.initialize()
+
+    assert {item["role"] for item in storage.list_admins()} == {"ADMIN"}
 
 
 def test_delivery_queue_is_idempotent_and_recoverable(tmp_path) -> None:

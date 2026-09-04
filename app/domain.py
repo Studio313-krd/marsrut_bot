@@ -11,9 +11,7 @@ class Platform(StrEnum):
 
 
 class AdminRole(StrEnum):
-    OWNER = "OWNER"
     ADMIN = "ADMIN"
-    VIEWER = "VIEWER"
 
 
 @dataclass(frozen=True, slots=True)

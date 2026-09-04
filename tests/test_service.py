@@ -69,11 +69,11 @@ def settings(path: Path) -> Settings:
         telegram_token="token",
         telegram_webhook_secret="c" * 16,
         telegram_username="test_bot",
-        telegram_owner_ids=(),
+        telegram_admin_ids=(),
         max_token="",
         max_webhook_secret="",
         max_username="",
-        max_owner_ids=(),
+        max_admin_ids=(),
         event_poll_interval=5,
         reminder_poll_interval=60,
         daily_digest_hour=9,
@@ -202,7 +202,7 @@ async def test_disabled_feature_rejects_callback_from_old_message(tmp_path) -> N
 async def test_admin_edits_main_message_from_bot_panel(tmp_path) -> None:
     storage = Storage(tmp_path / "bot.sqlite3")
     storage.initialize()
-    storage.ensure_owner(Platform.TELEGRAM, "100", "Владелец")
+    storage.ensure_admin(Platform.TELEGRAM, "100", "Администратор")
     messenger = FakeMessenger()
     service = BotService(
         settings(tmp_path / "bot.sqlite3"), storage, FakeSite(), {Platform.TELEGRAM: messenger}
@@ -223,3 +223,25 @@ async def test_admin_edits_main_message_from_bot_panel(tmp_path) -> None:
     await service.handle(incoming(5, text="/menu"))
 
     assert messenger.messages[-1].text == "Новое главное сообщение"
+
+
+@pytest.mark.asyncio
+async def test_every_admin_can_manage_access_without_role_choices(tmp_path) -> None:
+    storage = Storage(tmp_path / "bot.sqlite3")
+    storage.initialize()
+    storage.ensure_admin(Platform.TELEGRAM, "100", "Первый администратор")
+    messenger = FakeMessenger()
+    service = BotService(
+        settings(tmp_path / "bot.sqlite3"), storage, FakeSite(), {Platform.TELEGRAM: messenger}
+    )  # type: ignore[arg-type]
+    admin = storage.admin_for(Platform.TELEGRAM, "100")
+    assert admin
+
+    await service.show_admins(incoming(1), admin)
+
+    callbacks = {
+        button.callback for row in messenger.messages[-1].buttons for button in row if button.callback
+    }
+    assert "adm:add:ADMIN" in callbacks
+    assert any(callback.startswith("adm:view:") for callback in callbacks)
+    assert not any(callback.startswith("adm:role:") for callback in callbacks)

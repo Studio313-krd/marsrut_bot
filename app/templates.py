@@ -23,7 +23,7 @@ CONTENT_LABELS = {
     "reels": "Короткие видео",
     "all": "Все публикации",
 }
-ROLE_LABELS = {"OWNER": "Владелец", "ADMIN": "Администратор", "VIEWER": "Наблюдатель"}
+ROLE_LABELS = {"ADMIN": "Администратор"}
 
 
 def safe(value: Any) -> str:
@@ -250,10 +250,7 @@ def content_list(
     )
 
 
-def admin_menu(counts: dict[str, int], *, can_edit_content: bool = True) -> OutgoingMessage:
-    management_buttons = []
-    if can_edit_content:
-        management_buttons.append([Button("Тексты, кнопки и изображения", callback="cms:home")])
+def admin_menu(counts: dict[str, int]) -> OutgoingMessage:
     return OutgoingMessage(
         "<b>Панель администратора</b>\n\n"
         f"Новые: <b>{counts.get('NEW', 0)}</b>\n"
@@ -270,7 +267,7 @@ def admin_menu(counts: dict[str, int], *, can_edit_content: bool = True) -> Outg
                 Button("Мои заявки", callback="admin:requests:mine:0"),
             ],
             [Button("Администраторы", callback="admins:list"), Button("Рассылки", callback="broadcast:menu")],
-            *management_buttons,
+            [Button("Тексты, кнопки и изображения", callback="cms:home")],
             [Button("Выгрузить заявки CSV", callback="admin:export")],
             [
                 Button("Настройки уведомлений", callback="admin:preferences"),

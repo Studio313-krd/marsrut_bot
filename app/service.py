@@ -38,7 +38,6 @@ logger = logging.getLogger(__name__)
 _PHONE_RE = re.compile(r"^[+\d][\d\s()\-]{4,39}$")
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _APPLICATION_STEPS = ["name", "company", "position", "phone", "email", "message"]
-_MUTATING_ROLES = {AdminRole.OWNER.value, AdminRole.ADMIN.value}
 
 
 def _ensure_home_navigation(message: OutgoingMessage) -> None:
@@ -146,11 +145,11 @@ class BotService:
             _ensure_home_navigation(message)
             self.storage.customize_message(message)
 
-    def bootstrap_owners(self) -> None:
-        for user_id in self.settings.telegram_owner_ids:
-            self.storage.ensure_owner(Platform.TELEGRAM, user_id)
-        for user_id in self.settings.max_owner_ids:
-            self.storage.ensure_owner(Platform.MAX, user_id)
+    def bootstrap_admins(self) -> None:
+        for user_id in self.settings.telegram_admin_ids:
+            self.storage.ensure_admin(Platform.TELEGRAM, user_id)
+        for user_id in self.settings.max_admin_ids:
+            self.storage.ensure_admin(Platform.MAX, user_id)
 
     async def send(self, event: IncomingEvent, message: OutgoingMessage) -> None:
         _ensure_home_navigation(message)
@@ -808,7 +807,9 @@ class BotService:
         if self.storage.admin_for(event.platform, event.user_id):
             await self.send(
                 event,
-                OutgoingMessage("Сначала владелец должен отключить вашу административную учётную запись."),
+                OutgoingMessage(
+                    "Сначала другой администратор должен отключить вашу административную учётную запись."
+                ),
             )
             return
         try:
@@ -955,7 +956,7 @@ class BotService:
                 ),
             )
             return
-        await self.send(event, admin_menu(counts, can_edit_content=self._can_mutate(admin)))
+        await self.send(event, admin_menu(counts))
 
     async def handle_admin_callback(self, event: IncomingEvent, callback: str) -> None:
         admin = self.storage.admin_for(event.platform, event.user_id)
@@ -1068,9 +1069,6 @@ class BotService:
                 await self.show_admin_detail(event, admin, callback.rsplit(":", 1)[1])
             elif callback.startswith("adm:toggle:"):
                 await self.toggle_admin(event, admin, callback.rsplit(":", 1)[1])
-            elif callback.startswith("adm:role:"):
-                _, _, admin_id, role = callback.split(":", 3)
-                await self.change_admin_role(event, admin, admin_id, role)
             elif callback.startswith("adm:link:"):
                 await self.create_link_invite(event, admin, callback.rsplit(":", 1)[1])
             elif callback == "admin:preferences":
@@ -1125,11 +1123,11 @@ class BotService:
 
     @staticmethod
     def _can_mutate(admin: dict[str, Any]) -> bool:
-        return admin["role"] in _MUTATING_ROLES
+        return admin["role"] == AdminRole.ADMIN.value
 
     def _require_content_editor(self, admin: dict[str, Any]) -> None:
         if not self._can_mutate(admin):
-            raise ValueError("Редактор доступен владельцам и администраторам")
+            raise ValueError("Редактор доступен администраторам")
 
     async def show_cms_home(self, event: IncomingEvent, admin: dict[str, Any]) -> None:
         self._require_content_editor(admin)
@@ -1601,7 +1599,7 @@ class BotService:
 
     async def take_request(self, event: IncomingEvent, admin: dict[str, Any], request_id: str) -> None:
         if not self._can_mutate(admin):
-            raise ValueError("Роль наблюдателя не позволяет изменять заявки")
+            raise ValueError("Недостаточно прав для изменения заявки")
         await self.site.update_request(
             request_id,
             {
@@ -1619,11 +1617,7 @@ class BotService:
     ) -> None:
         if not self._can_mutate(admin):
             raise ValueError("Недостаточно прав")
-        candidates = [
-            item
-            for item in self.storage.list_admins()
-            if item["is_active"] and item["role"] in _MUTATING_ROLES
-        ]
+        candidates = [item for item in self.storage.list_admins() if item["is_active"]]
         buttons = [
             [
                 Button(
@@ -1917,26 +1911,22 @@ class BotService:
             lines.append(
                 f"{safe(item['display_name'])} · {safe(ROLE_LABELS.get(item['role'], item['role']))}\n{state} · {accounts}"
             )
-            if current["role"] == AdminRole.OWNER.value:
-                buttons.append([Button(item["display_name"][:32], callback=f"adm:view:{item['id']}")])
-        if current["role"] == AdminRole.OWNER.value:
-            buttons.extend(
-                [
-                    [
-                        Button("Добавить администратора", callback="adm:add:ADMIN"),
-                        Button("Добавить наблюдателя", callback="adm:add:VIEWER"),
-                    ],
-                    [Button("Добавить владельца", callback="adm:add:OWNER")],
-                ]
-            )
+            buttons.append([Button(item["display_name"][:32], callback=f"adm:view:{item['id']}")])
+        buttons.append([Button("Добавить администратора", callback="adm:add:ADMIN")])
         buttons.append([Button("Панель", callback="admin:home")])
         await self.send(event, OutgoingMessage("\n\n".join(lines), buttons))
 
     async def create_admin_invite(self, event: IncomingEvent, current: dict[str, Any], role: str) -> None:
-        if current["role"] != AdminRole.OWNER.value or role not in ROLE_LABELS:
-            raise ValueError("Только владелец может приглашать администраторов")
-        token = self.storage.create_invite(current["id"], AdminRole(role))
-        self.storage.audit(current["id"], "admin.invite.created", "admin_invite", None, {"role": role})
+        if not self._can_mutate(current) or role != AdminRole.ADMIN.value:
+            raise ValueError("Недостаточно прав")
+        token = self.storage.create_invite(current["id"], AdminRole.ADMIN)
+        self.storage.audit(
+            current["id"],
+            "admin.invite.created",
+            "admin_invite",
+            None,
+            {"role": AdminRole.ADMIN.value},
+        )
         links = []
         if self.settings.telegram_username:
             links.append(f"Telegram: https://t.me/{self.settings.telegram_username}?start={token}")
@@ -1946,7 +1936,7 @@ class BotService:
         await self.send(
             event,
             OutgoingMessage(
-                f"<b>Приглашение создано</b>\n\nРоль: {safe(ROLE_LABELS[role])}\nКод: <code>{token}</code>\n"
+                f"<b>Приглашение администратора создано</b>\n\nКод: <code>{token}</code>\n"
                 "Срок действия: 30 минут. Код одноразовый.\n\n"
                 f"{safe(link_text)}\n\nБудущий администратор должен открыть бота по ссылке или отправить <code>/start {token}</code>.",
                 [[Button("К администраторам", callback="admins:list")]],
@@ -1955,8 +1945,8 @@ class BotService:
         )
 
     async def show_admin_detail(self, event: IncomingEvent, current: dict[str, Any], admin_id: str) -> None:
-        if current["role"] != AdminRole.OWNER.value:
-            raise ValueError("Только владелец может управлять доступом")
+        if not self._can_mutate(current):
+            raise ValueError("Недостаточно прав")
         item = next((value for value in self.storage.list_admins() if value["id"] == admin_id), None)
         if not item:
             raise ValueError("Администратор не найден")
@@ -1965,11 +1955,6 @@ class BotService:
             for account in item["accounts"]
         )
         buttons = [
-            [
-                Button("Администратор", callback=f"adm:role:{admin_id}:ADMIN"),
-                Button("Наблюдатель", callback=f"adm:role:{admin_id}:VIEWER"),
-            ],
-            [Button("Владелец", callback=f"adm:role:{admin_id}:OWNER")],
             [Button("Отключить" if item["is_active"] else "Включить", callback=f"adm:toggle:{admin_id}")],
             [Button("Подключить вторую платформу", callback=f"adm:link:{admin_id}")],
             [Button("Назад", callback="admins:list")],
@@ -1984,12 +1969,12 @@ class BotService:
         )
 
     async def create_link_invite(self, event: IncomingEvent, current: dict[str, Any], admin_id: str) -> None:
-        if current["role"] != AdminRole.OWNER.value:
-            raise ValueError("Только владелец может связывать учётные записи")
+        if not self._can_mutate(current):
+            raise ValueError("Недостаточно прав")
         target = next((item for item in self.storage.list_admins() if item["id"] == admin_id), None)
         if not target:
             raise ValueError("Администратор не найден")
-        token = self.storage.create_invite(current["id"], AdminRole(target["role"]), target_admin_id=admin_id)
+        token = self.storage.create_invite(current["id"], AdminRole.ADMIN, target_admin_id=admin_id)
         self.storage.audit(current["id"], "admin.link.invite.created", "admin", admin_id)
         await self.send(
             event,
@@ -2002,8 +1987,10 @@ class BotService:
         )
 
     async def toggle_admin(self, event: IncomingEvent, current: dict[str, Any], admin_id: str) -> None:
-        if current["role"] != AdminRole.OWNER.value or current["id"] == admin_id:
-            raise ValueError("Нельзя отключить себя; это должен сделать другой владелец")
+        if not self._can_mutate(current):
+            raise ValueError("Недостаточно прав")
+        if current["id"] == admin_id:
+            raise ValueError("Нельзя отключить собственную учётную запись")
         item = next((value for value in self.storage.list_admins() if value["id"] == admin_id), None)
         if not item:
             raise ValueError("Администратор не найден")
@@ -2011,17 +1998,6 @@ class BotService:
         self.storage.audit(
             current["id"], "admin.active.changed", "admin", admin_id, {"active": not bool(item["is_active"])}
         )
-        await self.show_admins(event, current)
-
-    async def change_admin_role(
-        self, event: IncomingEvent, current: dict[str, Any], admin_id: str, role: str
-    ) -> None:
-        if current["role"] != AdminRole.OWNER.value or role not in ROLE_LABELS:
-            raise ValueError("Недостаточно прав")
-        if current["id"] == admin_id and role != AdminRole.OWNER.value:
-            raise ValueError("Нельзя понизить собственную роль")
-        self.storage.update_admin(admin_id, role=AdminRole(role))
-        self.storage.audit(current["id"], "admin.role.changed", "admin", admin_id, {"role": role})
         await self.show_admins(event, current)
 
     async def show_preferences(self, event: IncomingEvent, admin: dict[str, Any]) -> None:
@@ -2041,8 +2017,8 @@ class BotService:
         )
 
     async def show_system(self, event: IncomingEvent, admin: dict[str, Any]) -> None:
-        if admin["role"] != AdminRole.OWNER.value:
-            raise ValueError("Раздел доступен владельцам")
+        if not self._can_mutate(admin):
+            raise ValueError("Недостаточно прав")
         started = datetime.now(UTC)
         try:
             health = await self.site.health()
@@ -2102,8 +2078,8 @@ class BotService:
         )
 
     async def show_blocked_users(self, event: IncomingEvent, admin: dict[str, Any]) -> None:
-        if admin["role"] != AdminRole.OWNER.value:
-            raise ValueError("Раздел доступен владельцам")
+        if not self._can_mutate(admin):
+            raise ValueError("Недостаточно прав")
         rows = self.storage.blocked_users()
         lines = ["<b>Заблокированные пользователи</b>", ""]
         buttons = []
@@ -2129,15 +2105,15 @@ class BotService:
         platform: str,
         user_id: str,
     ) -> None:
-        if admin["role"] != AdminRole.OWNER.value:
-            raise ValueError("Раздел доступен владельцам")
+        if not self._can_mutate(admin):
+            raise ValueError("Недостаточно прав")
         self.storage.set_blocked(Platform(platform), user_id, False)
         self.storage.audit(admin["id"], "user.unblocked", "bot_user", f"{platform}:{user_id}")
         await self.show_blocked_users(event, admin)
 
     async def show_audit(self, event: IncomingEvent, admin: dict[str, Any]) -> None:
-        if admin["role"] != AdminRole.OWNER.value:
-            raise ValueError("Раздел доступен владельцам")
+        if not self._can_mutate(admin):
+            raise ValueError("Недостаточно прав")
         rows = self.storage.recent_audit(20)
         lines = ["<b>Последние действия</b>", ""]
         for row in rows:

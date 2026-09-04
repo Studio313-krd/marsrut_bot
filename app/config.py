@@ -37,11 +37,11 @@ class Settings:
     telegram_token: str
     telegram_webhook_secret: str
     telegram_username: str
-    telegram_owner_ids: tuple[str, ...]
+    telegram_admin_ids: tuple[str, ...]
     max_token: str
     max_webhook_secret: str
     max_username: str
-    max_owner_ids: tuple[str, ...]
+    max_admin_ids: tuple[str, ...]
     event_poll_interval: int
     reminder_poll_interval: int
     daily_digest_hour: int
@@ -75,11 +75,11 @@ def load_settings(*, require_platform: bool = True) -> Settings:
         telegram_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_webhook_secret=os.getenv("TELEGRAM_WEBHOOK_SECRET", ""),
         telegram_username=os.getenv("TELEGRAM_BOT_USERNAME", "").lstrip("@"),
-        telegram_owner_ids=_csv_ids(os.getenv("TELEGRAM_OWNER_IDS", "")),
+        telegram_admin_ids=_csv_ids(os.getenv("TELEGRAM_ADMIN_IDS", os.getenv("TELEGRAM_OWNER_IDS", ""))),
         max_token=os.getenv("MAX_BOT_TOKEN", ""),
         max_webhook_secret=os.getenv("MAX_WEBHOOK_SECRET", ""),
         max_username=os.getenv("MAX_BOT_USERNAME", "").lstrip("@"),
-        max_owner_ids=_csv_ids(os.getenv("MAX_OWNER_IDS", "")),
+        max_admin_ids=_csv_ids(os.getenv("MAX_ADMIN_IDS", os.getenv("MAX_OWNER_IDS", ""))),
         event_poll_interval=max(2, _integer("EVENT_POLL_INTERVAL_SECONDS", 5)),
         reminder_poll_interval=max(15, _integer("REMINDER_POLL_INTERVAL_SECONDS", 60)),
         daily_digest_hour=min(23, max(0, _integer("DAILY_DIGEST_HOUR", 9))),
