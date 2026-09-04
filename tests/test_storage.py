@@ -119,6 +119,11 @@ def test_content_overrides_images_buttons_and_custom_page(tmp_path) -> None:
     assert rendered.buttons[-1][0].callback == f"page:show:{page_id}"
     assert storage.custom_content_message(page_id)
 
+    preview = storage.content_preview_message(entry["id"])
+    assert preview and preview.text == rendered.text
+    assert preview.images == rendered.images
+    assert preview.buttons[-1][0].callback == f"page:show:{page_id}"
+
     storage.toggle_content_button(button_id)
     rendered = storage.customize_message(original)
     assert all(button.callback != f"page:show:{page_id}" for row in rendered.buttons for button in row)

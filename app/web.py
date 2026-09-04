@@ -4,11 +4,12 @@ import asyncio
 import contextlib
 import hmac
 import logging
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from app.config import Settings, load_settings
 from app.domain import Platform
@@ -122,6 +123,23 @@ async def health_details(
     except SiteApiError as exc:
         site = {"ok": False, "error": str(exc)}
     return {"status": "ok", "site": site, "queue": service.storage.queue_stats()}
+
+
+@app.get("/cms-media/{filename}", include_in_schema=False)
+async def cms_media(request: Request, filename: str) -> FileResponse:
+    if not re.fullmatch(r"[a-f0-9]{32}\.(?:jpg|png|gif|webp)", filename):
+        raise HTTPException(status_code=404)
+    settings: Settings = request.app.state.settings
+    path = settings.database_path.parent / "cms-media" / filename
+    if not path.is_file():
+        raise HTTPException(status_code=404)
+    return FileResponse(
+        path,
+        headers={
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.post("/webhooks/telegram")

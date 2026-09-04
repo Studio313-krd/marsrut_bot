@@ -23,6 +23,7 @@ class TelegramMessenger(Messenger):
     platform = Platform.TELEGRAM
 
     def __init__(self, token: str) -> None:
+        self._token = token
         self._base_url = f"https://api.telegram.org/bot{token}"
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0))
 
@@ -160,6 +161,43 @@ class TelegramMessenger(Messenger):
         response.raise_for_status()
         if not response.json().get("ok"):
             raise RuntimeError("Telegram rejected document")
+
+    async def download_image(self, event: IncomingEvent) -> tuple[bytes, str] | None:
+        message = event.raw.get("message") if isinstance(event.raw, dict) else None
+        if not isinstance(message, dict):
+            return None
+        photos = message.get("photo")
+        file_id = None
+        if isinstance(photos, list) and photos:
+            largest = max(
+                (item for item in photos if isinstance(item, dict) and item.get("file_id")),
+                key=lambda item: (
+                    int(item.get("file_size") or 0),
+                    int(item.get("width") or 0) * int(item.get("height") or 0),
+                ),
+                default=None,
+            )
+            if largest:
+                file_id = largest["file_id"]
+        document = message.get("document")
+        if (
+            not file_id
+            and isinstance(document, dict)
+            and str(document.get("mime_type") or "").startswith("image/")
+        ):
+            file_id = document.get("file_id")
+        if not file_id:
+            return None
+
+        metadata = await self._client.get(f"{self._base_url}/getFile", params={"file_id": file_id})
+        metadata.raise_for_status()
+        result = metadata.json()
+        file_path = (result.get("result") or {}).get("file_path") if result.get("ok") else None
+        if not file_path:
+            return None
+        downloaded = await self._client.get(f"https://api.telegram.org/file/bot{self._token}/{file_path}")
+        downloaded.raise_for_status()
+        return downloaded.content, str(downloaded.headers.get("content-type") or "image/jpeg")
 
     async def configure_bot(self) -> None:
         requests = (

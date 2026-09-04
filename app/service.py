@@ -28,6 +28,7 @@ from app.templates import (
     content_list,
     editable_default_messages,
     format_datetime,
+    plain_text,
     request_card,
     safe,
     user_menu,
@@ -38,6 +39,19 @@ logger = logging.getLogger(__name__)
 _PHONE_RE = re.compile(r"^[+\d][\d\s()\-]{4,39}$")
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _APPLICATION_STEPS = ["name", "company", "position", "phone", "email", "message"]
+_CMS_IMAGE_LIMIT = 10 * 1024 * 1024
+
+
+def _image_suffix(payload: bytes) -> str | None:
+    if payload.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if payload.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    if len(payload) >= 12 and payload.startswith(b"RIFF") and payload[8:12] == b"WEBP":
+        return ".webp"
+    return None
 
 
 def _ensure_home_navigation(message: OutgoingMessage) -> None:
@@ -139,6 +153,7 @@ class BotService:
         self.storage = storage
         self.site = site
         self.messengers = messengers
+        self.cms_media_dir = settings.database_path.parent / "cms-media"
         self._rate_windows: dict[tuple[Platform, str], deque[float]] = defaultdict(deque)
         self.storage.seed_content_catalog(list(CONTENT_CATALOG))
         for message in editable_default_messages(settings.privacy_url, settings.site_public_url):
@@ -990,14 +1005,40 @@ class BotService:
             elif callback.startswith("cms:preview:"):
                 await self.preview_cms_entry(event, admin, int(callback.rsplit(":", 1)[1]))
             elif callback.startswith("cms:text:"):
-                await self.start_cms_text(event, admin, int(callback.rsplit(":", 1)[1]))
+                await self.show_cms_text_menu(event, admin, int(callback.rsplit(":", 1)[1]))
+            elif callback.startswith("cms:text-replace:"):
+                await self.start_cms_text(event, admin, int(callback.rsplit(":", 1)[1]), "replace")
+            elif callback.startswith("cms:text-before:"):
+                await self.start_cms_text(event, admin, int(callback.rsplit(":", 1)[1]), "before")
+            elif callback.startswith("cms:text-after:"):
+                await self.start_cms_text(event, admin, int(callback.rsplit(":", 1)[1]), "after")
             elif callback.startswith("cms:images:"):
                 await self.start_cms_images(event, admin, int(callback.rsplit(":", 1)[1]))
+            elif callback.startswith("cms:images-done:"):
+                content_id = int(callback.rsplit(":", 1)[1])
+                self.storage.clear_conversation(event.platform, event.user_id)
+                await self.show_cms_entry(event, admin, content_id, notice="Картинки сохранены")
+            elif callback.startswith("cms:images-clear:"):
+                content_id = int(callback.rsplit(":", 1)[1])
+                entry = self.storage.content_entry(content_id)
+                previous_images = self._cms_entry_images(entry)
+                self.storage.set_content_images(content_id, [])
+                self._delete_managed_cms_images(previous_images)
+                self.storage.clear_conversation(event.platform, event.user_id)
+                self.storage.audit(
+                    admin["id"], "bot_content.images.changed", "bot_content", str(content_id), {"count": 0}
+                )
+                await self.show_cms_entry(event, admin, content_id, notice="Все картинки удалены")
+            elif callback.startswith("cms:edit-back:"):
+                content_id = int(callback.rsplit(":", 1)[1])
+                self.storage.clear_conversation(event.platform, event.user_id)
+                await self.show_cms_entry(event, admin, content_id)
             elif callback.startswith("cms:reset-text:"):
                 content_id = int(callback.rsplit(":", 1)[1])
                 self.storage.set_content_text(content_id, None)
+                self.storage.clear_conversation(event.platform, event.user_id)
                 self.storage.audit(admin["id"], "bot_content.text.reset", "bot_content", str(content_id))
-                await self.show_cms_entry(event, admin, content_id)
+                await self.show_cms_entry(event, admin, content_id, notice="Стандартный текст восстановлен")
             elif callback.startswith("cms:buttons:"):
                 _, _, content_id, offset = callback.split(":", 3)
                 await self.show_cms_buttons(event, admin, int(content_id), int(offset))
@@ -1005,6 +1046,16 @@ class BotService:
                 await self.show_cms_button(event, admin, int(callback.rsplit(":", 1)[1]))
             elif callback.startswith("cms:button-text:"):
                 await self.start_cms_button_text(event, admin, int(callback.rsplit(":", 1)[1]))
+            elif callback.startswith("cms:button-reset:"):
+                button_id = int(callback.rsplit(":", 1)[1])
+                self.storage.set_content_button_text(button_id, None)
+                self.storage.clear_conversation(event.platform, event.user_id)
+                self.storage.audit(admin["id"], "bot_content.button.renamed", "bot_button", str(button_id))
+                await self.show_cms_button(event, admin, button_id, notice="Название восстановлено")
+            elif callback.startswith("cms:button-back:"):
+                button_id = int(callback.rsplit(":", 1)[1])
+                self.storage.clear_conversation(event.platform, event.user_id)
+                await self.show_cms_button(event, admin, button_id)
             elif callback.startswith("cms:button-toggle:"):
                 button_id = int(callback.rsplit(":", 1)[1])
                 button = self.storage.content_button(button_id)
@@ -1155,10 +1206,9 @@ class BotService:
         await self.send(
             event,
             OutgoingMessage(
-                "<b>Тексты, кнопки и изображения</b>\n\n"
-                "Выберите раздел. Внутри можно изменить текст любого ответа, добавить до 10 изображений, "
-                "переименовать или скрыть кнопки и создать новую кнопку с отдельным сообщением.\n\n"
-                "Настройки сохраняются отдельно от кода и не теряются при обновлении бота.",
+                "<b>Редактор сообщений</b>\n\n"
+                "Здесь можно изменить сообщения и картинки, которые видят пользователи.\n\n"
+                "Выберите нужный раздел:",
                 buttons,
                 content_key="admin.content.home",
                 content_title="Редактор контента",
@@ -1203,8 +1253,7 @@ class BotService:
             event,
             OutgoingMessage(
                 f"<b>{safe(CATEGORY_LABELS[category])}</b>\n\n"
-                "✏️ — текст изменён, 🖼 — добавлены изображения.\n"
-                "Выберите ответ для редактирования.",
+                "Выберите сообщение. Значки ✏️ и 🖼 показывают, что оно уже изменено.",
                 buttons,
                 content_key="admin.content.list",
                 content_title="Список редактируемых ответов",
@@ -1212,7 +1261,14 @@ class BotService:
             ),
         )
 
-    async def show_cms_entry(self, event: IncomingEvent, admin: dict[str, Any], content_id: int) -> None:
+    async def show_cms_entry(
+        self,
+        event: IncomingEvent,
+        admin: dict[str, Any],
+        content_id: int,
+        *,
+        notice: str | None = None,
+    ) -> None:
         self._require_content_editor(admin)
         entry = self.storage.content_entry(content_id)
         if not entry:
@@ -1222,38 +1278,43 @@ class BotService:
         except (TypeError, ValueError):
             images = []
         current_text = entry["text_override"]
-        text_preview = current_text if current_text is not None else entry["default_text"]
+        if current_text is None:
+            text_preview = entry["default_text"]
+        else:
+            text_preview = (
+                str(current_text)
+                .replace("{{default}}", str(entry["default_text"]))
+                .replace("{default}", str(entry["default_text"]))
+            )
         text_preview = str(text_preview or "Ответ ещё не показывался пользователям.")
-        lines = [
-            f"<b>{safe(entry['title'])}</b>",
-            "",
-            f"Ключ: <code>{safe(entry['content_key'])}</code>",
-            f"Текст: <b>{'изменён' if current_text is not None else 'по умолчанию'}</b>",
-            f"Изображений: <b>{len(images)}</b>",
-            "",
-            "<b>Сейчас будет показано:</b>",
-            safe(text_preview[:1100]),
-        ]
+        lines = []
+        if notice:
+            lines.extend([f"✅ <b>{safe(notice)}</b>", ""])
+        lines.extend(
+            [
+                f"<b>{safe(entry['title'])}</b>",
+                "",
+                "<b>Сейчас пользователь увидит:</b>",
+                safe(plain_text(text_preview)[:1100]),
+                "",
+                f"Картинки: <b>{len(images) if images else 'нет'}</b>",
+            ]
+        )
         content_buttons = entry["buttons"]
         buttons = [
+            [Button("✏️ Изменить текст", callback=f"cms:text:{content_id}")],
             [
-                Button("Изменить текст", callback=f"cms:text:{content_id}"),
-                Button("Изображения", callback=f"cms:images:{content_id}"),
+                Button(
+                    "🖼 Добавить картинку" if not images else f"🖼 Картинки ({len(images)})",
+                    callback=f"cms:images:{content_id}",
+                )
             ],
-            [Button("Добавить кнопку и сообщение", callback=f"cms:add:{content_id}")],
-            [Button("Предпросмотр", callback=f"cms:preview:{content_id}")],
+            [Button("👀 Показать как пользователю", callback=f"cms:preview:{content_id}")],
+            [Button(f"⚙️ Настроить кнопки ({len(content_buttons)})", callback=f"cms:buttons:{content_id}:0")],
         ]
         if current_text is not None:
-            buttons.append([Button("Вернуть исходный текст", callback=f"cms:reset-text:{content_id}")])
-        for item in content_buttons[:8]:
-            state = "✅" if item["is_visible"] else "🚫"
-            label = str(item.get("text_override") or item["default_text"])
-            buttons.append([Button(f"{state} Кнопка: {label[:36]}", callback=f"cms:button:{item['id']}")])
-        if len(content_buttons) > 8:
-            buttons.append(
-                [Button(f"Все кнопки · {len(content_buttons)}", callback=f"cms:buttons:{content_id}:0")]
-            )
-        buttons.append([Button("К списку", callback=f"cms:list:{entry['category']}:0")])
+            buttons.append([Button("↩️ Вернуть стандартный текст", callback=f"cms:reset-text:{content_id}")])
+        buttons.append([Button("Назад к списку", callback=f"cms:list:{entry['category']}:0")])
         await self.send(
             event,
             OutgoingMessage(
@@ -1294,6 +1355,7 @@ class BotService:
             navigation.append(Button("Далее", callback=f"cms:buttons:{content_id}:{offset + page_size}"))
         if navigation:
             buttons.append(navigation)
+        buttons.append([Button("Добавить новую кнопку", callback=f"cms:add:{content_id}")])
         buttons.append([Button("К ответу", callback=f"cms:view:{content_id}")])
         await self.send(
             event,
@@ -1312,7 +1374,8 @@ class BotService:
         message = self.storage.content_preview_message(content_id)
         if not message:
             raise ValueError("Ответ не найден")
-        await self.send(event, message)
+        _ensure_home_navigation(message)
+        await self.messengers[event.platform].send(event.chat_id, message)
         await self.send(
             event,
             OutgoingMessage(
@@ -1324,31 +1387,74 @@ class BotService:
             ),
         )
 
-    async def start_cms_text(self, event: IncomingEvent, admin: dict[str, Any], content_id: int) -> None:
+    async def show_cms_text_menu(self, event: IncomingEvent, admin: dict[str, Any], content_id: int) -> None:
         self._require_content_editor(admin)
-        if not self.storage.content_entry(content_id):
+        entry = self.storage.content_entry(content_id)
+        if not entry:
             raise ValueError("Ответ не найден")
-        self.storage.set_conversation(
-            event.platform, event.user_id, "cms_text", "value", {"content_id": content_id}
-        )
+        buttons = [
+            [Button("Заменить весь текст", callback=f"cms:text-replace:{content_id}")],
+            [Button("Добавить текст в начало", callback=f"cms:text-before:{content_id}")],
+            [Button("Добавить текст в конец", callback=f"cms:text-after:{content_id}")],
+        ]
+        if entry["text_override"] is not None:
+            buttons.append([Button("Вернуть стандартный текст", callback=f"cms:reset-text:{content_id}")])
+        buttons.append([Button("Назад", callback=f"cms:view:{content_id}")])
         await self.send(
             event,
             OutgoingMessage(
-                "<b>Новый текст ответа</b>\n\n"
-                "Отправьте текст одним сообщением. Разрешена HTML-разметка Telegram/MAX.\n\n"
-                "Для динамического ответа вставьте <code>{default}</code> — на его месте останется "
-                "актуальный встроенный текст с именами, номерами и статусами.\n\n"
-                "Отправьте <code>-</code>, чтобы вернуть исходный текст, или /cancel для отмены.",
-                [[Button("Отмена", callback="flow:cancel")]],
+                f"<b>Изменить текст</b>\n\nСообщение: «{safe(entry['title'])}»\n\nЧто вы хотите сделать?",
+                buttons,
                 content_key="admin.content.edit_text",
-                content_title="Подсказка редактирования текста",
+                content_title="Выбор изменения текста",
+                content_category="admin",
+            ),
+        )
+
+    async def start_cms_text(
+        self,
+        event: IncomingEvent,
+        admin: dict[str, Any],
+        content_id: int,
+        mode: str,
+    ) -> None:
+        self._require_content_editor(admin)
+        if not self.storage.content_entry(content_id) or mode not in {"replace", "before", "after"}:
+            raise ValueError("Ответ не найден")
+        self.storage.set_conversation(
+            event.platform, event.user_id, f"cms_text_{mode}", "value", {"content_id": content_id}
+        )
+        prompts = {
+            "replace": (
+                "<b>Новый текст</b>\n\n"
+                "Напишите и отправьте новый текст сообщения. Он полностью заменит текущий."
+            ),
+            "before": (
+                "<b>Текст в начале</b>\n\n"
+                "Напишите, что нужно добавить перед основным сообщением. "
+                "Имена, номера заявок и статусы продолжат обновляться автоматически."
+            ),
+            "after": (
+                "<b>Текст в конце</b>\n\n"
+                "Напишите, что нужно добавить после основного сообщения. "
+                "Имена, номера заявок и статусы продолжат обновляться автоматически."
+            ),
+        }
+        await self.send(
+            event,
+            OutgoingMessage(
+                prompts[mode],
+                [[Button("Отмена и назад", callback=f"cms:edit-back:{content_id}")]],
+                content_key=f"admin.content.edit_text_{mode}",
+                content_title="Ввод нового текста",
                 content_category="admin",
             ),
         )
 
     async def start_cms_images(self, event: IncomingEvent, admin: dict[str, Any], content_id: int) -> None:
         self._require_content_editor(admin)
-        if not self.storage.content_entry(content_id):
+        entry = self.storage.content_entry(content_id)
+        if not entry:
             raise ValueError("Ответ не найден")
         self.storage.set_conversation(
             event.platform, event.user_id, "cms_images", "value", {"content_id": content_id}
@@ -1356,24 +1462,36 @@ class BotService:
         await self.send(
             event,
             OutgoingMessage(
-                "<b>Изображения ответа</b>\n\n"
-                "Отправьте до 10 прямых HTTPS-ссылок на изображения — по одной в строке. "
-                "Они будут показаны перед текстом и одинаково работают в Telegram и MAX.\n\n"
-                "Отправьте <code>-</code>, чтобы удалить все изображения, или /cancel для отмены.",
-                [[Button("Отмена", callback="flow:cancel")]],
+                "<b>Картинки сообщения</b>\n\n"
+                "Отправьте картинку сюда как обычное фото — она сразу добавится к сообщению. "
+                "Можно добавить до 10 картинок по одной.",
+                [
+                    [Button("Готово, вернуться", callback=f"cms:images-done:{content_id}")],
+                    *(
+                        [[Button("Удалить все картинки", callback=f"cms:images-clear:{content_id}")]]
+                        if json.loads(entry["images_json"])
+                        else []
+                    ),
+                ],
                 content_key="admin.content.edit_images",
-                content_title="Подсказка добавления изображений",
+                content_title="Добавление картинок",
                 content_category="admin",
             ),
         )
 
-    async def show_cms_button(self, event: IncomingEvent, admin: dict[str, Any], button_id: int) -> None:
+    async def show_cms_button(
+        self,
+        event: IncomingEvent,
+        admin: dict[str, Any],
+        button_id: int,
+        *,
+        notice: str | None = None,
+    ) -> None:
         self._require_content_editor(admin)
         button = self.storage.content_button(button_id)
         if not button:
             raise ValueError("Кнопка не найдена")
         label = str(button.get("text_override") or button["default_text"])
-        destination = button.get("url") or button.get("callback") or "служебное действие"
         buttons = [
             [Button("Переименовать", callback=f"cms:button-text:{button_id}")],
             [
@@ -1383,6 +1501,11 @@ class BotService:
                 )
             ],
         ]
+        if button.get("text_override"):
+            buttons.insert(
+                1,
+                [Button("Вернуть стандартное название", callback=f"cms:button-reset:{button_id}")],
+            )
         if button["is_custom"]:
             buttons.append(
                 [
@@ -1397,10 +1520,10 @@ class BotService:
         await self.send(
             event,
             OutgoingMessage(
+                f"{'✅ ' + safe(notice) + chr(10) + chr(10) if notice else ''}"
                 f"<b>Кнопка «{safe(label)}»</b>\n\n"
-                f"В ответе: {safe(button['content_title'])}\n"
-                f"Состояние: <b>{'показывается' if button['is_visible'] else 'скрыта'}</b>\n"
-                f"Действие: <code>{safe(destination)}</code>",
+                f"Сообщение: {safe(button['content_title'])}\n"
+                f"Сейчас кнопка <b>{'показывается' if button['is_visible'] else 'скрыта'}</b>.",
                 buttons,
                 content_key="admin.content.edit_button",
                 content_title="Редактор кнопки",
@@ -1420,9 +1543,8 @@ class BotService:
         await self.send(
             event,
             OutgoingMessage(
-                "Отправьте новое название кнопки (до 64 символов).\n"
-                "Отправьте <code>-</code>, чтобы вернуть исходное название.",
-                [[Button("Отмена", callback="flow:cancel")]],
+                "<b>Новое название кнопки</b>\n\nНапишите и отправьте новое название.",
+                [[Button("Отмена и назад", callback=f"cms:button-back:{button_id}")]],
                 content_key="admin.content.edit_button_text",
                 content_title="Подсказка переименования кнопки",
                 content_category="admin",
@@ -1447,6 +1569,44 @@ class BotService:
             ),
         )
 
+    async def _save_incoming_cms_image(self, event: IncomingEvent) -> str | None:
+        messenger = self.messengers.get(event.platform)
+        if not messenger:
+            return None
+        try:
+            downloaded = await messenger.download_image(event)
+        except Exception as exc:
+            logger.warning("Could not download an administrator image: %s", type(exc).__name__)
+            return None
+        if not downloaded:
+            return None
+        payload, _content_type = downloaded
+        suffix = _image_suffix(payload)
+        if not suffix or not payload or len(payload) > _CMS_IMAGE_LIMIT:
+            raise ValueError("Подойдёт картинка JPG, PNG, GIF или WEBP размером до 10 МБ")
+        self.cms_media_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"{secrets.token_hex(16)}{suffix}"
+        (self.cms_media_dir / filename).write_bytes(payload)
+        return f"{self.settings.public_base_url}/cms-media/{filename}"
+
+    @staticmethod
+    def _cms_entry_images(entry: dict[str, Any] | None) -> list[str]:
+        if not entry:
+            return []
+        try:
+            return [str(url) for url in json.loads(entry["images_json"])]
+        except (KeyError, TypeError, ValueError):
+            return []
+
+    def _delete_managed_cms_images(self, image_urls: list[str]) -> None:
+        prefix = f"{self.settings.public_base_url.rstrip('/')}/cms-media/"
+        for image_url in image_urls:
+            if not image_url.startswith(prefix):
+                continue
+            filename = image_url.removeprefix(prefix)
+            if re.fullmatch(r"[a-f0-9]{32}\.(?:jpg|png|gif|webp)", filename):
+                (self.cms_media_dir / filename).unlink(missing_ok=True)
+
     async def handle_cms_conversation(self, event: IncomingEvent, conversation: dict[str, Any]) -> None:
         admin = self.storage.admin_for(event.platform, event.user_id)
         if not admin:
@@ -1457,27 +1617,91 @@ class BotService:
         flow = conversation["flow"]
         value = (event.text or "").strip()
         data = conversation["data"]
-        if flow == "cms_text":
+        if flow in {"cms_text", "cms_text_replace", "cms_text_before", "cms_text_after"}:
             if not value or len(value) > 4000:
-                await self.send(event, OutgoingMessage("Текст должен содержать от 1 до 4000 символов."))
+                await self.send(
+                    event,
+                    OutgoingMessage(
+                        "Сообщение получилось пустым или слишком длинным. Отправьте текст короче."
+                    ),
+                )
                 return
             content_id = int(data["content_id"])
-            self.storage.set_content_text(content_id, None if value == "-" else value)
+            entry = self.storage.content_entry(content_id)
+            if not entry:
+                raise ValueError("Сообщение не найдено")
+            existing_text = str(entry["text_override"] or "{default}")
+            if flow == "cms_text_before":
+                updated_text = f"{value}\n\n{existing_text}"
+            elif flow == "cms_text_after":
+                updated_text = f"{existing_text}\n\n{value}"
+            else:
+                updated_text = None if value == "-" else value
+            self.storage.set_content_text(content_id, updated_text)
             self.storage.clear_conversation(event.platform, event.user_id)
             self.storage.audit(admin["id"], "bot_content.text.changed", "bot_content", str(content_id))
-            await self.show_cms_entry(event, admin, content_id)
+            await self.show_cms_entry(event, admin, content_id, notice="Текст сохранён")
             return
         if flow == "cms_images":
             content_id = int(data["content_id"])
-            images = [] if value == "-" else [line.strip() for line in value.splitlines() if line.strip()]
-            if len(images) > 10 or any(not re.fullmatch(r"https://[^\s]+", url) for url in images):
+            entry = self.storage.content_entry(content_id)
+            if not entry:
+                raise ValueError("Сообщение не найдено")
+            images = self._cms_entry_images(entry)
+            if value == "-":
+                self._delete_managed_cms_images(images)
+                images = []
+            else:
+                if len(images) >= 10:
+                    await self.send(
+                        event,
+                        OutgoingMessage(
+                            "У сообщения уже 10 картинок. Удалите их или нажмите «Готово».",
+                            [
+                                [Button("Готово, вернуться", callback=f"cms:images-done:{content_id}")],
+                                [
+                                    Button(
+                                        "Удалить все картинки",
+                                        callback=f"cms:images-clear:{content_id}",
+                                    )
+                                ],
+                            ],
+                        ),
+                    )
+                    return
+                image_url = await self._save_incoming_cms_image(event)
+                supplied_urls = [
+                    line.strip()
+                    for line in value.splitlines()
+                    if re.fullmatch(r"https://[^\s]+", line.strip())
+                ]
+                additions = ([image_url] if image_url else []) + supplied_urls
+                if not additions:
+                    await self.send(
+                        event,
+                        OutgoingMessage(
+                            "Не получилось добавить картинку. Отправьте её как обычное фото.",
+                            [
+                                [Button("Готово, вернуться", callback=f"cms:images-done:{content_id}")],
+                                [Button("Назад", callback=f"cms:edit-back:{content_id}")],
+                            ],
+                        ),
+                    )
+                    return
+                images.extend(url for url in additions if url not in images)
+            if len(images) > 10:
                 await self.send(
                     event,
-                    OutgoingMessage("Нужно отправить от 1 до 10 корректных HTTPS-ссылок, по одной в строке."),
+                    OutgoingMessage(
+                        "У сообщения уже 10 картинок. Удалите их или нажмите «Готово».",
+                        [
+                            [Button("Готово, вернуться", callback=f"cms:images-done:{content_id}")],
+                            [Button("Удалить все картинки", callback=f"cms:images-clear:{content_id}")],
+                        ],
+                    ),
                 )
                 return
             self.storage.set_content_images(content_id, images)
-            self.storage.clear_conversation(event.platform, event.user_id)
             self.storage.audit(
                 admin["id"],
                 "bot_content.images.changed",
@@ -1485,7 +1709,21 @@ class BotService:
                 str(content_id),
                 {"count": len(images)},
             )
-            await self.show_cms_entry(event, admin, content_id)
+            change_message = (
+                "✅ Все картинки удалены."
+                if value == "-"
+                else f"✅ Картинка добавлена. Сейчас их: <b>{len(images)}</b>."
+            )
+            await self.send(
+                event,
+                OutgoingMessage(
+                    f"{change_message}\n\nМожно отправить следующую или вернуться к сообщению.",
+                    [
+                        [Button("Готово, вернуться", callback=f"cms:images-done:{content_id}")],
+                        [Button("Удалить все картинки", callback=f"cms:images-clear:{content_id}")],
+                    ],
+                ),
+            )
             return
         if flow == "cms_button_text":
             if not value or len(value) > 64:

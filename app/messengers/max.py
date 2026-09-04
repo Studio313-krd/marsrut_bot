@@ -8,6 +8,7 @@ import logging
 import re
 from html import unescape
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -16,6 +17,16 @@ from app.messengers.base import Messenger
 
 _PHONE_RE = re.compile(r"^TEL(?:;[^:]*)?:(.+)$", re.MULTILINE | re.IGNORECASE)
 logger = logging.getLogger(__name__)
+
+
+def _image_urls(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        direct = [item for key, item in value.items() if "url" in str(key).lower() and isinstance(item, str)]
+        nested = [url for item in value.values() for url in _image_urls(item)]
+        return direct + nested
+    if isinstance(value, list):
+        return [url for item in value for url in _image_urls(item)]
+    return []
 
 
 class MaxMessenger(Messenger):
@@ -154,6 +165,35 @@ class MaxMessenger(Messenger):
             },
         )
         response.raise_for_status()
+
+    async def download_image(self, event: IncomingEvent) -> tuple[bytes, str] | None:
+        message = event.raw.get("message") if isinstance(event.raw, dict) else None
+        body = message.get("body") if isinstance(message, dict) else None
+        attachments = body.get("attachments") if isinstance(body, dict) else None
+        if not isinstance(attachments, list):
+            return None
+        image_url = None
+        for attachment in attachments:
+            if not isinstance(attachment, dict) or attachment.get("type") != "image":
+                continue
+            payload = attachment.get("payload") or {}
+            candidates = _image_urls(payload)
+            image_url = candidates[-1] if candidates else None
+            if image_url:
+                break
+        if not image_url:
+            return None
+        parsed = urlparse(image_url)
+        hostname = (parsed.hostname or "").lower()
+        trusted = any(
+            hostname == domain or hostname.endswith(f".{domain}") for domain in ("oneme.ru", "okcdn.ru")
+        )
+        if parsed.scheme != "https" or not trusted:
+            return None
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=7.0)) as downloader:
+            response = await downloader.get(image_url)
+            response.raise_for_status()
+        return response.content, str(response.headers.get("content-type") or "image/jpeg")
 
     async def register_webhook(self, public_base_url: str, secret: str) -> None:
         response = await self._client.post(

@@ -9,7 +9,7 @@ import httpx
 import pytest
 import respx
 
-from app.domain import Button, OutgoingMessage
+from app.domain import Button, IncomingEvent, OutgoingMessage, Platform
 from app.messengers.max import MaxMessenger
 from app.messengers.telegram import TelegramMessenger
 
@@ -74,6 +74,40 @@ async def test_telegram_sends_multiple_images_before_text() -> None:
 
     assert photos.call_count == 2
     assert text.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_telegram_downloads_photo_sent_by_admin() -> None:
+    metadata = respx.get("https://api.telegram.org/bottoken/getFile?file_id=large").mock(
+        return_value=httpx.Response(200, json={"ok": True, "result": {"file_path": "photos/admin.jpg"}})
+    )
+    image = respx.get("https://api.telegram.org/file/bottoken/photos/admin.jpg").mock(
+        return_value=httpx.Response(200, content=b"\xff\xd8\xffphoto", headers={"content-type": "image/jpeg"})
+    )
+    messenger = TelegramMessenger("token")
+    event = IncomingEvent(
+        platform=Platform.TELEGRAM,
+        update_id="1",
+        user_id="1",
+        chat_id="1",
+        display_name="Администратор",
+        raw={
+            "message": {
+                "photo": [
+                    {"file_id": "small", "file_size": 100},
+                    {"file_id": "large", "file_size": 1000},
+                ]
+            }
+        },
+    )
+    try:
+        downloaded = await messenger.download_image(event)
+    finally:
+        await messenger.close()
+
+    assert metadata.called and image.called
+    assert downloaded == (b"\xff\xd8\xffphoto", "image/jpeg")
 
 
 @pytest.mark.asyncio
@@ -169,3 +203,33 @@ async def test_max_sends_multiple_images_before_text() -> None:
         await messenger.close()
 
     assert messages.call_count == 3
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_max_downloads_photo_sent_by_admin() -> None:
+    image = respx.get("https://iu.oneme.ru/photo.jpg").mock(
+        return_value=httpx.Response(200, content=b"\xff\xd8\xffphoto", headers={"content-type": "image/jpeg"})
+    )
+    messenger = MaxMessenger("token")
+    event = IncomingEvent(
+        platform=Platform.MAX,
+        update_id="1",
+        user_id="1",
+        chat_id="1",
+        display_name="Администратор",
+        raw={
+            "message": {
+                "body": {
+                    "attachments": [{"type": "image", "payload": {"url": "https://iu.oneme.ru/photo.jpg"}}]
+                }
+            }
+        },
+    )
+    try:
+        downloaded = await messenger.download_image(event)
+    finally:
+        await messenger.close()
+
+    assert image.called
+    assert downloaded == (b"\xff\xd8\xffphoto", "image/jpeg")

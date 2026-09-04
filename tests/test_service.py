@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -18,6 +19,7 @@ class FakeMessenger(Messenger):
 
     def __init__(self) -> None:
         self.messages: list[OutgoingMessage] = []
+        self.incoming_image: tuple[bytes, str] | None = None
 
     def parse_update(self, payload: dict[str, Any]) -> IncomingEvent | None:
         del payload
@@ -26,6 +28,10 @@ class FakeMessenger(Messenger):
     async def send(self, recipient_id: str, message: OutgoingMessage) -> None:
         del recipient_id
         self.messages.append(message)
+
+    async def download_image(self, event: IncomingEvent) -> tuple[bytes, str] | None:
+        del event
+        return self.incoming_image
 
     async def register_webhook(self, public_base_url: str, secret: str) -> None:
         del public_base_url, secret
@@ -234,14 +240,77 @@ async def test_admin_edits_main_message_from_bot_panel(tmp_path) -> None:
     assert "cms:home" in callbacks
 
     await service.handle(incoming(2, callback="cms:home"))
-    assert "Тексты, кнопки и изображения" in messenger.messages[-1].text
+    assert "Редактор сообщений" in messenger.messages[-1].text
     main = next(item for item in storage.content_entries("main") if item["content_key"] == "main.menu")
 
     await service.handle(incoming(3, callback=f"cms:text:{main['id']}"))
-    await service.handle(incoming(4, text="Новое главное сообщение"))
-    await service.handle(incoming(5, text="/menu"))
+    assert "{default}" not in messenger.messages[-1].text
+    assert "HTML" not in messenger.messages[-1].text
+    await service.handle(incoming(4, callback=f"cms:text-replace:{main['id']}"))
+    await service.handle(incoming(5, text="Новое главное сообщение"))
+    await service.handle(incoming(6, text="/menu"))
 
     assert messenger.messages[-1].text == "Новое главное сообщение"
+
+
+@pytest.mark.asyncio
+async def test_admin_can_add_photo_without_a_url(tmp_path) -> None:
+    storage = Storage(tmp_path / "bot.sqlite3")
+    storage.initialize()
+    storage.ensure_admin(Platform.TELEGRAM, "100", "Администратор")
+    messenger = FakeMessenger()
+    messenger.incoming_image = (b"\x89PNG\r\n\x1a\nimage-data", "image/png")
+    service = BotService(
+        settings(tmp_path / "bot.sqlite3"), storage, FakeSite(), {Platform.TELEGRAM: messenger}
+    )  # type: ignore[arg-type]
+    main = next(item for item in storage.content_entries("main") if item["content_key"] == "main.menu")
+
+    await service.handle(incoming(1, callback=f"cms:images:{main['id']}"))
+    assert "как обычное фото" in messenger.messages[-1].text
+    assert "HTTPS" not in messenger.messages[-1].text
+    await service.handle(incoming(2))
+
+    entry = storage.content_entry(main["id"])
+    assert entry
+    image_url = json.loads(entry["images_json"])[0]
+    assert image_url.startswith("https://bot.example.test/cms-media/")
+    assert (tmp_path / "cms-media" / image_url.rsplit("/", 1)[1]).is_file()
+    assert "Картинка добавлена" in messenger.messages[-1].text
+
+    await service.handle(incoming(3, callback=f"cms:images-done:{main['id']}"))
+    assert storage.conversation(Platform.TELEGRAM, "100") is None
+    assert "Картинки сохранены" in messenger.messages[-1].text
+
+    await service.handle(incoming(4, callback=f"cms:images:{main['id']}"))
+    await service.handle(incoming(5, callback=f"cms:images-clear:{main['id']}"))
+    assert not (tmp_path / "cms-media" / image_url.rsplit("/", 1)[1]).exists()
+    assert json.loads(storage.content_entry(main["id"])["images_json"]) == []
+
+
+@pytest.mark.asyncio
+async def test_admin_can_add_text_before_dynamic_message_without_technical_marker(tmp_path) -> None:
+    storage = Storage(tmp_path / "bot.sqlite3")
+    storage.initialize()
+    storage.ensure_admin(Platform.TELEGRAM, "100", "Администратор")
+    messenger = FakeMessenger()
+    service = BotService(
+        settings(tmp_path / "bot.sqlite3"), storage, FakeSite(), {Platform.TELEGRAM: messenger}
+    )  # type: ignore[arg-type]
+    entry = next(item for item in storage.content_entries("main") if item["content_key"] == "main.menu")
+
+    await service.handle(incoming(1, callback=f"cms:text-before:{entry['id']}"))
+    assert "{default}" not in messenger.messages[-1].text
+    await service.handle(incoming(2, text="Спасибо за обращение!"))
+
+    updated = storage.content_entry(entry["id"])
+    assert updated and updated["text_override"] == "Спасибо за обращение!\n\n{default}"
+    assert "{default}" not in messenger.messages[-1].text
+    assert "Спасибо за обращение!" in messenger.messages[-1].text
+
+    await service.handle(incoming(3, callback=f"cms:preview:{entry['id']}"))
+    preview = messenger.messages[-2]
+    assert preview.text.count("Спасибо за обращение!") == 1
+    assert "МАРШРУТ ПОСТРОЕН" in preview.text
 
 
 @pytest.mark.asyncio

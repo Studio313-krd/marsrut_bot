@@ -22,6 +22,11 @@ class Messenger(ABC):
         del recipient_id, filename, content, caption
         raise NotImplementedError("File sending is not supported by this adapter")
 
+    async def download_image(self, event: IncomingEvent) -> tuple[bytes, str] | None:
+        """Return an image attached to an incoming message, if the platform exposes one."""
+        del event
+        return None
+
     async def configure_bot(self) -> None:
         """Configure platform-native commands and navigation when supported."""
         return None

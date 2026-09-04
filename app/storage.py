@@ -744,19 +744,31 @@ class Storage:
             return None
         rows: dict[int, list[Button]] = {}
         for button in entry["buttons"]:
-            if button["is_custom"]:
+            if not button["is_visible"]:
                 continue
+            callback = button.get("callback")
+            if button["is_custom"] and button.get("target_content_id"):
+                callback = f"page:show:{button['target_content_id']}"
             rows.setdefault(int(button["row_index"]), []).append(
                 Button(
-                    text=str(button["default_text"]),
-                    callback=button.get("callback"),
+                    text=str(button.get("text_override") or button["default_text"]),
+                    callback=callback,
                     url=button.get("url"),
                     kind=str(button.get("kind") or "callback"),
                 )
             )
+        override = entry["text_override"]
+        text = str(entry["default_text"] or "Предпросмотр появится после первого показа ответа.")
+        if override is not None:
+            text = str(override).replace("{{default}}", text).replace("{default}", text)
+        try:
+            images = [str(value) for value in json.loads(entry["images_json"])]
+        except (TypeError, ValueError):
+            images = []
         return OutgoingMessage(
-            text=str(entry["default_text"] or "Предпросмотр появится после первого показа ответа."),
+            text=text,
             buttons=[rows[index] for index in sorted(rows)],
+            images=images,
             content_key=str(entry["content_key"]),
             content_title=str(entry["title"]),
             content_category=str(entry["category"]),
