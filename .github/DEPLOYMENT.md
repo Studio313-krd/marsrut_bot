@@ -15,8 +15,34 @@ Configure these repository Actions secrets before the first deployment:
 - `DEPLOY_SSH_KEY`: its private Ed25519 key;
 - `DEPLOY_KNOWN_HOSTS`: the verified `known_hosts` line for the server.
 
-The deployment user must be able to connect without a password and use passwordless `sudo` only
-for the commands required by the workflow (`tar`, `chown`, `systemctl`, and running commands as
-`marsrut-bot`). Do not store `.env`, bot tokens or server passwords in GitHub.
+The deployment user connects without a password and may run only the root-owned
+`/usr/local/sbin/marsrut-bot-deploy` helper through passwordless `sudo`. The helper has hard-coded
+application, service and health-check targets; validates the release archive; performs application
+file operations as `marsrut-bot`; and preserves `.env`, `.venv`, `data`, `logs`, and `backups`.
+
+Install or update the helper once from a trusted root session on the production server:
+
+```bash
+curl -fsSL \
+  https://raw.githubusercontent.com/Studio313-krd/marsrut_bot/main/.github/scripts/marsrut-bot-deploy \
+  -o /tmp/marsrut-bot-deploy
+
+install -o root -g root -m 0755 \
+  /tmp/marsrut-bot-deploy \
+  /usr/local/sbin/marsrut-bot-deploy
+
+printf '%s\n' \
+  'marsrut-deploy ALL=(root) NOPASSWD: /usr/local/sbin/marsrut-bot-deploy' \
+  > /etc/sudoers.d/marsrut-bot-deploy
+
+chmod 0440 /etc/sudoers.d/marsrut-bot-deploy
+visudo -cf /etc/sudoers.d/marsrut-bot-deploy
+sudo -u marsrut-deploy sudo -n /usr/local/sbin/marsrut-bot-deploy --check
+rm -f /tmp/marsrut-bot-deploy
+```
+
+Do not add `marsrut-deploy` to the `sudo` group and do not grant it direct access to generic
+`tar`, `chown`, `systemctl`, shells, editors, or commands run as `marsrut-bot`. Do not store `.env`,
+bot tokens or server passwords in GitHub.
 
 Run a deployment from GitHub: **Actions → Deploy production → Run workflow**.
