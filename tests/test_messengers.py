@@ -78,6 +78,37 @@ async def test_telegram_sends_multiple_images_before_text() -> None:
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_telegram_uploads_bot_owned_image_directly(tmp_path) -> None:
+    media_dir = tmp_path / "cms-media"
+    media_dir.mkdir()
+    filename = f"{'a' * 32}.jpg"
+    (media_dir / filename).write_bytes(b"\xff\xd8\xfflocal-photo")
+    photo = respx.post("https://api.telegram.org/bottoken/sendPhoto").mock(
+        return_value=httpx.Response(200, json={"ok": True, "result": {}})
+    )
+    respx.post("https://api.telegram.org/bottoken/sendMessage").mock(
+        return_value=httpx.Response(200, json={"ok": True, "result": {}})
+    )
+    messenger = TelegramMessenger(
+        "token",
+        cms_media_dir=media_dir,
+        public_base_url="https://bot.example.test",
+    )
+    try:
+        failed = await messenger.send(
+            "1",
+            OutgoingMessage("Ответ", images=[f"https://bot.example.test/cms-media/{filename}"]),
+        )
+    finally:
+        await messenger.close()
+
+    assert failed == []
+    assert b"local-photo" in photo.calls.last.request.content
+    assert b"multipart/form-data" in photo.calls.last.request.headers["content-type"].encode()
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_telegram_downloads_photo_sent_by_admin() -> None:
     metadata = respx.get("https://api.telegram.org/bottoken/getFile?file_id=large").mock(
         return_value=httpx.Response(200, json={"ok": True, "result": {"file_path": "photos/admin.jpg"}})
@@ -203,6 +234,41 @@ async def test_max_sends_multiple_images_before_text() -> None:
         await messenger.close()
 
     assert messages.call_count == 3
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_max_uploads_bot_owned_image_directly(tmp_path) -> None:
+    media_dir = tmp_path / "cms-media"
+    media_dir.mkdir()
+    filename = f"{'b' * 32}.png"
+    (media_dir / filename).write_bytes(b"\x89PNG\r\n\x1a\nlocal-photo")
+    respx.post("https://platform-api2.max.ru/uploads?type=image").mock(
+        return_value=httpx.Response(200, json={"url": "https://iu.oneme.ru/upload.do"})
+    )
+    upload = respx.post("https://iu.oneme.ru/upload.do").mock(
+        return_value=httpx.Response(200, json={"token": "image-token"})
+    )
+    messages = respx.post("https://platform-api2.max.ru/messages").mock(
+        return_value=httpx.Response(200, json={"message": {}})
+    )
+    messenger = MaxMessenger(
+        "token",
+        cms_media_dir=media_dir,
+        public_base_url="https://bot.example.test",
+    )
+    try:
+        failed = await messenger.send(
+            "1",
+            OutgoingMessage("Ответ", images=[f"https://bot.example.test/cms-media/{filename}"]),
+        )
+    finally:
+        await messenger.close()
+
+    assert failed == []
+    assert b"local-photo" in upload.calls.last.request.content
+    image_payload = json.loads(messages.calls[0].request.content)
+    assert image_payload["attachments"][0]["payload"] == {"token": "image-token"}
 
 
 @pytest.mark.asyncio

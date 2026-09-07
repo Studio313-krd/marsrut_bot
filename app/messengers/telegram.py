@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import logging
+import mimetypes
 import re
 from html import unescape
+from pathlib import Path
 from typing import Any
 
 import httpx
 
 from app.domain import Button, IncomingEvent, OutgoingMessage, Platform
-from app.messengers.base import Messenger
+from app.messengers.base import Messenger, local_cms_image_path
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +24,16 @@ _REPLY_CALLBACK_LABELS = {
 class TelegramMessenger(Messenger):
     platform = Platform.TELEGRAM
 
-    def __init__(self, token: str) -> None:
+    def __init__(
+        self,
+        token: str,
+        *,
+        cms_media_dir: Path | None = None,
+        public_base_url: str = "",
+    ) -> None:
         self._token = token
+        self._cms_media_dir = cms_media_dir
+        self._public_base_url = public_base_url.rstrip("/")
         self._base_url = f"https://api.telegram.org/bot{token}"
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0))
 
@@ -87,21 +97,36 @@ class TelegramMessenger(Messenger):
             return {"text": _REPLY_CALLBACK_LABELS[button.callback]}
         return None
 
-    async def send(self, recipient_id: str, message: OutgoingMessage) -> None:
+    async def send(self, recipient_id: str, message: OutgoingMessage) -> list[str]:
+        failed_images: list[str] = []
         for image_url in message.images:
             try:
-                response = await self._client.post(
-                    f"{self._base_url}/sendPhoto",
-                    json={"chat_id": recipient_id, "photo": image_url},
+                local_path = local_cms_image_path(
+                    image_url,
+                    public_base_url=self._public_base_url,
+                    cms_media_dir=self._cms_media_dir,
                 )
+                if local_path:
+                    media_type = mimetypes.guess_type(local_path.name)[0] or "application/octet-stream"
+                    response = await self._client.post(
+                        f"{self._base_url}/sendPhoto",
+                        data={"chat_id": recipient_id},
+                        files={"photo": (local_path.name, local_path.read_bytes(), media_type)},
+                    )
+                else:
+                    response = await self._client.post(
+                        f"{self._base_url}/sendPhoto",
+                        json={"chat_id": recipient_id, "photo": image_url},
+                    )
                 response.raise_for_status()
                 result = response.json()
                 if not result.get("ok"):
                     raise RuntimeError(
                         f"Telegram sendPhoto failed: {result.get('description', 'unknown error')}"
                     )
-            except (httpx.HTTPError, RuntimeError):
-                logger.warning("Could not send a configured image", exc_info=True)
+            except (httpx.HTTPError, OSError, RuntimeError) as exc:
+                logger.warning("Could not send a configured image: %s", type(exc).__name__)
+                failed_images.append(image_url)
 
         body: dict[str, Any] = {
             "chat_id": recipient_id,
@@ -143,6 +168,7 @@ class TelegramMessenger(Messenger):
         result = response.json()
         if not result.get("ok"):
             raise RuntimeError(f"Telegram sendMessage failed: {result.get('description', 'unknown error')}")
+        return failed_images
 
     async def answer_callback(self, callback_id: str | None) -> None:
         if not callback_id:

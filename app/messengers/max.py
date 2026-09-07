@@ -5,15 +5,17 @@ import hashlib
 import hmac
 import json
 import logging
+import mimetypes
 import re
 from html import unescape
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 
 from app.domain import Button, IncomingEvent, OutgoingMessage, Platform
-from app.messengers.base import Messenger
+from app.messengers.base import Messenger, local_cms_image_path
 
 _PHONE_RE = re.compile(r"^TEL(?:;[^:]*)?:(.+)$", re.MULTILINE | re.IGNORECASE)
 logger = logging.getLogger(__name__)
@@ -32,8 +34,16 @@ def _image_urls(value: Any) -> list[str]:
 class MaxMessenger(Messenger):
     platform = Platform.MAX
 
-    def __init__(self, token: str) -> None:
+    def __init__(
+        self,
+        token: str,
+        *,
+        cms_media_dir: Path | None = None,
+        public_base_url: str = "",
+    ) -> None:
         self._token = token
+        self._cms_media_dir = cms_media_dir
+        self._public_base_url = public_base_url.rstrip("/")
         self._client = httpx.AsyncClient(
             base_url="https://platform-api2.max.ru",
             headers={"Authorization": token},
@@ -104,17 +114,44 @@ class MaxMessenger(Messenger):
             return {"type": "link", "text": button.text, "url": button.url}
         return {"type": "callback", "text": button.text, "payload": button.callback or "noop"}
 
-    async def send(self, recipient_id: str, message: OutgoingMessage) -> None:
+    async def _local_image_token(self, path: Path) -> str:
+        allocation = await self._client.post("/uploads", params={"type": "image"})
+        allocation.raise_for_status()
+        upload_url = allocation.json()["url"]
+        media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as uploader:
+            uploaded = await uploader.post(
+                upload_url,
+                files={"data": (path.name, path.read_bytes(), media_type)},
+            )
+            uploaded.raise_for_status()
+        result = uploaded.json()
+        token = result.get("token") or (result.get("retval") or {}).get("token")
+        if not token:
+            raise RuntimeError("MAX upload response does not contain an image token")
+        return str(token)
+
+    async def send(self, recipient_id: str, message: OutgoingMessage) -> list[str]:
+        failed_images: list[str] = []
         for image_url in message.images:
             try:
+                local_path = local_cms_image_path(
+                    image_url,
+                    public_base_url=self._public_base_url,
+                    cms_media_dir=self._cms_media_dir,
+                )
+                payload = (
+                    {"token": await self._local_image_token(local_path)} if local_path else {"url": image_url}
+                )
                 response = await self._client.post(
                     "/messages",
                     params={"user_id": recipient_id},
-                    json={"attachments": [{"type": "image", "payload": {"url": image_url}}]},
+                    json={"attachments": [{"type": "image", "payload": payload}]},
                 )
                 response.raise_for_status()
-            except httpx.HTTPError:
-                logger.warning("Could not send a configured image", exc_info=True)
+            except (httpx.HTTPError, OSError, RuntimeError, KeyError, ValueError) as exc:
+                logger.warning("Could not send a configured image: %s", type(exc).__name__)
+                failed_images.append(image_url)
 
         body: dict[str, Any] = {
             "text": message.text[:4000],
@@ -137,6 +174,7 @@ class MaxMessenger(Messenger):
             fallback["text"] = unescape(re.sub(r"<[^>]*>", "", message.text))[:4000]
             response = await self._client.post("/messages", params={"user_id": recipient_id}, json=fallback)
         response.raise_for_status()
+        return failed_images
 
     async def answer_callback(self, callback_id: str | None) -> None:
         if not callback_id:

@@ -38,10 +38,19 @@ def build_service(settings: Settings) -> BotService:
     storage = Storage(settings.database_path)
     storage.initialize()
     messengers: dict[Platform, Messenger] = {}
+    cms_media_dir = settings.database_path.parent / "cms-media"
     if settings.telegram_enabled:
-        messengers[Platform.TELEGRAM] = TelegramMessenger(settings.telegram_token)
+        messengers[Platform.TELEGRAM] = TelegramMessenger(
+            settings.telegram_token,
+            cms_media_dir=cms_media_dir,
+            public_base_url=settings.public_base_url,
+        )
     if settings.max_enabled:
-        messengers[Platform.MAX] = MaxMessenger(settings.max_token)
+        messengers[Platform.MAX] = MaxMessenger(
+            settings.max_token,
+            cms_media_dir=cms_media_dir,
+            public_base_url=settings.public_base_url,
+        )
     service = BotService(
         settings=settings,
         storage=storage,

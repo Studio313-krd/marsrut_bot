@@ -1375,11 +1375,18 @@ class BotService:
         if not message:
             raise ValueError("Ответ не найден")
         _ensure_home_navigation(message)
-        await self.messengers[event.platform].send(event.chat_id, message)
+        failed_images = await self.messengers[event.platform].send(event.chat_id, message)
+        if failed_images:
+            result_text = (
+                "Текст показан выше, но картинки не отправились. "
+                "Удалите их, добавьте заново и повторите предпросмотр."
+            )
+        else:
+            result_text = "Предпросмотр показан выше."
         await self.send(
             event,
             OutgoingMessage(
-                "Предпросмотр показан выше.",
+                result_text,
                 [[Button("Вернуться к редактированию", callback=f"cms:view:{content_id}")]],
                 content_key="admin.content.preview_return",
                 content_title="Возврат из предпросмотра",

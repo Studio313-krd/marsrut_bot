@@ -20,14 +20,16 @@ class FakeMessenger(Messenger):
     def __init__(self) -> None:
         self.messages: list[OutgoingMessage] = []
         self.incoming_image: tuple[bytes, str] | None = None
+        self.failed_images: list[str] = []
 
     def parse_update(self, payload: dict[str, Any]) -> IncomingEvent | None:
         del payload
         return None
 
-    async def send(self, recipient_id: str, message: OutgoingMessage) -> None:
+    async def send(self, recipient_id: str, message: OutgoingMessage) -> list[str]:
         del recipient_id
         self.messages.append(message)
+        return self.failed_images
 
     async def download_image(self, event: IncomingEvent) -> tuple[bytes, str] | None:
         del event
@@ -311,6 +313,24 @@ async def test_admin_can_add_text_before_dynamic_message_without_technical_marke
     preview = messenger.messages[-2]
     assert preview.text.count("Спасибо за обращение!") == 1
     assert "МАРШРУТ ПОСТРОЕН" in preview.text
+
+
+@pytest.mark.asyncio
+async def test_admin_preview_reports_image_delivery_failure(tmp_path) -> None:
+    storage = Storage(tmp_path / "bot.sqlite3")
+    storage.initialize()
+    storage.ensure_admin(Platform.TELEGRAM, "100", "Администратор")
+    messenger = FakeMessenger()
+    service = BotService(
+        settings(tmp_path / "bot.sqlite3"), storage, FakeSite(), {Platform.TELEGRAM: messenger}
+    )  # type: ignore[arg-type]
+    entry = next(item for item in storage.content_entries("main") if item["content_key"] == "main.menu")
+    storage.set_content_images(entry["id"], ["https://bot.example.test/cms-media/missing.jpg"])
+    messenger.failed_images = ["https://bot.example.test/cms-media/missing.jpg"]
+
+    await service.handle(incoming(1, callback=f"cms:preview:{entry['id']}"))
+
+    assert "картинки не отправились" in messenger.messages[-1].text
 
 
 @pytest.mark.asyncio
