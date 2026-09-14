@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from app.config import Settings, load_settings
 from app.domain import Platform
+from app.leadership import router as leadership_router
 from app.messengers.base import Messenger
 from app.messengers.max import MaxMessenger
 from app.messengers.telegram import TelegramMessenger
@@ -108,6 +109,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Маршрут построен — bot gateway", docs_url=None, redoc_url=None, lifespan=lifespan)
+app.include_router(leadership_router)
 
 
 def _secret_matches(received: str | None, expected: str) -> bool:

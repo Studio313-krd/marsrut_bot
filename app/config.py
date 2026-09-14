@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -46,6 +46,7 @@ class Settings:
     reminder_poll_interval: int
     daily_digest_hour: int
     outbox_retention_days: int
+    leadership_report_key: str = field(default="", repr=False)
 
     @property
     def telegram_enabled(self) -> bool:
@@ -84,6 +85,7 @@ def load_settings(*, require_platform: bool = True) -> Settings:
         reminder_poll_interval=max(15, _integer("REMINDER_POLL_INTERVAL_SECONDS", 60)),
         daily_digest_hour=min(23, max(0, _integer("DAILY_DIGEST_HOUR", 9))),
         outbox_retention_days=max(7, _integer("OUTBOX_RETENTION_DAYS", 30)),
+        leadership_report_key=os.getenv("LEADERSHIP_REPORT_KEY", ""),
     )
     required = {
         "APP_SECRET": settings.app_secret,

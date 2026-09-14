@@ -180,9 +180,11 @@ class SiteClient:
         response = await self._send("GET", "/exports/requests.csv")
         return response.content
 
-    async def request_statistics(self, *, from_date: str | None = None) -> dict[str, Any]:
+    async def request_statistics(
+        self, *, from_date: str | None = None, to_date: str | None = None
+    ) -> dict[str, Any]:
         return await self._request(
-            "GET", "/exports/request-statistics", params={"from": from_date}, timeout=60.0
+            "GET", "/exports/request-statistics", params={"from": from_date, "to": to_date}, timeout=60.0
         )
 
     async def close(self) -> None:
