@@ -275,6 +275,7 @@ def admin_menu(counts: dict[str, int]) -> OutgoingMessage:
                 Button("Система", callback="admin:system"),
             ],
             [Button("Главное меню", callback="menu")],
+            [Button("Статистика заявок Excel", callback="admin:statistics")],
         ],
         content_key="admin.home",
         content_title="Главная страница панели администратора",

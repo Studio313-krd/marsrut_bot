@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 import httpx
 
 from app.domain import Button, IncomingEvent, OutgoingMessage, Platform
-from app.messengers.base import Messenger, local_cms_image_path
+from app.messengers.base import Messenger, document_mime_type, local_cms_image_path
 
 _PHONE_RE = re.compile(r"^TEL(?:;[^:]*)?:(.+)$", re.MULTILINE | re.IGNORECASE)
 logger = logging.getLogger(__name__)
@@ -187,7 +187,9 @@ class MaxMessenger(Messenger):
         allocation.raise_for_status()
         upload_url = allocation.json()["url"]
         async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as uploader:
-            uploaded = await uploader.post(upload_url, files={"data": (filename, content, "text/csv")})
+            uploaded = await uploader.post(
+                upload_url, files={"data": (filename, content, document_mime_type(filename))}
+            )
             uploaded.raise_for_status()
         result = uploaded.json()
         token = result.get("token") or (result.get("retval") or {}).get("token")

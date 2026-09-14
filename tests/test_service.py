@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import io
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import openpyxl
 import pytest
 
 from app.config import Settings
@@ -14,6 +17,69 @@ from app.service import BotService
 from app.storage import Storage
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", [Platform.TELEGRAM, Platform.MAX])
+async def test_admin_statistics_callback_sends_real_excel_in_both_platforms(tmp_path, platform):
+    from test_statistics import sample_payload
+
+    class StatisticsSite(FakeSite):
+        async def request_statistics(self, *, from_date=None):
+            self.from_date = from_date
+            return sample_payload()
+
+    storage = Storage(tmp_path / "statistics.sqlite3")
+    storage.initialize()
+    storage.ensure_admin(platform, "100", "Администратор")
+    messenger = FakeMessenger()
+    site = StatisticsSite()
+    service = BotService(settings(storage.path), storage, site, {platform: messenger})
+    await service.handle(replace(incoming(1, callback="admin:statistics"), platform=platform))
+    assert any(
+        button.callback == "admin:statistics:all" for row in messenger.messages[-1].buttons for button in row
+    )
+    await service.handle(replace(incoming(2, callback="admin:statistics:all"), platform=platform))
+    assert len(messenger.documents) == 1
+    recipient, filename, content, _caption = messenger.documents[0]
+    assert recipient == "100" and filename.endswith(".xlsx")
+    assert openpyxl.load_workbook(io.BytesIO(content), data_only=True)["Сводка"]["B2"].value == 2
+    assert site.from_date is None
+    assert any(row["action"] == "requests.statistics.exported" for row in storage.recent_audit())
+
+
+@pytest.mark.asyncio
+async def test_non_admin_cannot_export_statistics(tmp_path):
+    storage = Storage(tmp_path / "statistics.sqlite3")
+    storage.initialize()
+    messenger = FakeMessenger()
+    service = BotService(settings(storage.path), storage, FakeSite(), {Platform.TELEGRAM: messenger})
+    await service.handle(incoming(1, callback="admin:statistics:all"))
+    assert not messenger.documents
+    assert "не найден" in messenger.messages[-1].text
+
+
+@pytest.mark.asyncio
+async def test_statistics_delivery_failure_releases_lock_and_offers_retry(tmp_path):
+    from test_statistics import sample_payload
+
+    class StatisticsSite(FakeSite):
+        async def request_statistics(self, **kwargs):
+            return sample_payload()
+
+    class FailedMessenger(FakeMessenger):
+        async def send_document(self, *args):
+            raise RuntimeError("Delivery failed")
+
+    storage = Storage(tmp_path / "statistics.sqlite3")
+    storage.initialize()
+    storage.ensure_admin(Platform.TELEGRAM, "100", "Администратор")
+    messenger = FailedMessenger()
+    service = BotService(settings(storage.path), storage, StatisticsSite(), {Platform.TELEGRAM: messenger})
+    await service.handle(incoming(1, callback="admin:statistics:all"))
+    assert not service._statistics_lock.locked()
+    assert "Не удалось отправить" in messenger.messages[-1].text
+    assert not any(row["action"] == "requests.statistics.exported" for row in storage.recent_audit())
+
+
 class FakeMessenger(Messenger):
     platform = Platform.TELEGRAM
 
@@ -21,6 +87,10 @@ class FakeMessenger(Messenger):
         self.messages: list[OutgoingMessage] = []
         self.incoming_image: tuple[bytes, str] | None = None
         self.failed_images: list[str] = []
+        self.documents: list[tuple[str, str, bytes, str]] = []
+
+    async def send_document(self, recipient_id: str, filename: str, content: bytes, caption: str) -> None:
+        self.documents.append((recipient_id, filename, content, caption))
 
     def parse_update(self, payload: dict[str, Any]) -> IncomingEvent | None:
         del payload

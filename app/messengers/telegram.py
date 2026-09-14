@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 
 from app.domain import Button, IncomingEvent, OutgoingMessage, Platform
-from app.messengers.base import Messenger, local_cms_image_path
+from app.messengers.base import Messenger, document_mime_type, local_cms_image_path
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +182,8 @@ class TelegramMessenger(Messenger):
         response = await self._client.post(
             f"{self._base_url}/sendDocument",
             data={"chat_id": recipient_id, "caption": caption, "parse_mode": "HTML"},
-            files={"document": (filename, content, "text/csv")},
+            files={"document": (filename, content, document_mime_type(filename))},
+            timeout=httpx.Timeout(60.0, connect=7.0),
         )
         response.raise_for_status()
         if not response.json().get("ok"):

@@ -11,11 +11,14 @@ from datetime import UTC, datetime, timedelta
 from html import escape
 from typing import Any
 
+import httpx
+
 from app.config import Settings
 from app.content import CATEGORY_LABELS, CONTENT_CATALOG, feature_for_callback
 from app.domain import AdminRole, Button, IncomingEvent, OutgoingMessage, Platform
 from app.messengers.base import Messenger
 from app.site_client import SiteApiError, SiteClient
+from app.statistics import build_statistics_workbook
 from app.storage import Storage
 from app.templates import (
     CONTENT_LABELS,
@@ -155,6 +158,7 @@ class BotService:
         self.messengers = messengers
         self.cms_media_dir = settings.database_path.parent / "cms-media"
         self._rate_windows: dict[tuple[Platform, str], deque[float]] = defaultdict(deque)
+        self._statistics_lock = asyncio.Lock()
         self.storage.seed_content_catalog(list(CONTENT_CATALOG))
         for message in editable_default_messages(settings.privacy_url, settings.site_public_url):
             _ensure_home_navigation(message)
@@ -931,7 +935,7 @@ class BotService:
             {
                 "type": "MESSAGE_FROM_USER",
                 "body": text,
-                "actor": {"key": event.user_id, "name": event.display_name},
+                "actor": {"key": event.user_id, "name": event.display_name, "channel": event.platform.value},
             },
         )
         self.storage.clear_conversation(event.platform, event.user_id)
@@ -1144,6 +1148,10 @@ class BotService:
                 await self.unblock_user(event, admin, platform, user_id)
             elif callback == "admin:export":
                 await self.export_requests(event, admin)
+            elif callback == "admin:statistics":
+                await self.show_statistics_periods(event)
+            elif callback.startswith("admin:statistics:"):
+                await self.export_statistics(event, admin, callback.rsplit(":", 1)[1])
             elif callback == "admin:audit":
                 await self.show_audit(event, admin)
             elif callback == "broadcast:menu":
@@ -1855,7 +1863,7 @@ class BotService:
                 "status": "IN_PROGRESS",
                 "assignedAdminKey": admin["id"],
                 "assignedAdminName": admin["display_name"],
-                "actor": {"key": admin["id"], "name": admin["display_name"]},
+                "actor": {"key": admin["id"], "name": admin["display_name"], "channel": event.platform.value},
             },
         )
         self.storage.audit(admin["id"], "request.taken", "request", request_id)
@@ -1896,7 +1904,7 @@ class BotService:
             {
                 "assignedAdminKey": assignee["id"],
                 "assignedAdminName": assignee["display_name"],
-                "actor": {"key": admin["id"], "name": admin["display_name"]},
+                "actor": {"key": admin["id"], "name": admin["display_name"], "channel": event.platform.value},
             },
         )
         self.storage.audit(
@@ -1922,7 +1930,11 @@ class BotService:
         if not self._can_mutate(admin) or status not in STATUS_LABELS:
             raise ValueError("Недостаточно прав или неизвестный статус")
         await self.site.update_request(
-            request_id, {"status": status, "actor": {"key": admin["id"], "name": admin["display_name"]}}
+            request_id,
+            {
+                "status": status,
+                "actor": {"key": admin["id"], "name": admin["display_name"], "channel": event.platform.value},
+            },
         )
         self.storage.audit(admin["id"], "request.status.changed", "request", request_id, {"status": status})
         await self.show_admin_request(event, request_id)
@@ -1975,7 +1987,11 @@ class BotService:
                 {
                     "type": "COMMENT",
                     "body": text,
-                    "actor": {"key": admin["id"], "name": admin["display_name"]},
+                    "actor": {
+                        "key": admin["id"],
+                        "name": admin["display_name"],
+                        "channel": event.platform.value,
+                    },
                 },
             )
             self.storage.audit(admin["id"], "request.comment.added", "request", request_id)
@@ -2024,7 +2040,11 @@ class BotService:
                 {
                     "type": "MESSAGE_TO_USER",
                     "body": text,
-                    "actor": {"key": admin["id"], "name": admin["display_name"]},
+                    "actor": {
+                        "key": admin["id"],
+                        "name": admin["display_name"],
+                        "channel": event.platform.value,
+                    },
                 },
             )
             self.storage.audit(admin["id"], "request.message.sent", "request", request_id)
@@ -2073,7 +2093,7 @@ class BotService:
             request_id,
             {
                 "nextContactAt": value.astimezone(UTC).isoformat() if value else None,
-                "actor": {"key": admin["id"], "name": admin["display_name"]},
+                "actor": {"key": admin["id"], "name": admin["display_name"], "channel": event.platform.value},
             },
         )
         self.storage.audit(
@@ -2138,7 +2158,7 @@ class BotService:
             {
                 "type": "COMMENT",
                 "body": "Отправитель заблокирован в боте.",
-                "actor": {"key": admin["id"], "name": admin["display_name"]},
+                "actor": {"key": admin["id"], "name": admin["display_name"], "channel": event.platform.value},
             },
         )
         self.storage.audit(admin["id"], "user.blocked", "request", request_id)
@@ -2325,6 +2345,110 @@ class BotService:
                 content_category="admin",
             ),
         )
+
+    async def show_statistics_periods(self, event: IncomingEvent) -> None:
+        await self.send(
+            event,
+            OutgoingMessage(
+                "<b>Статистика заявок в Excel</b>\n\n"
+                "Выберите период создания заявок. Файл покажет частоту поступления, "
+                "время до первого действия и завершения, исполнителей и историю обработки.\n\n"
+                "Неизвестные данные старых заявок будут отмечены отдельно.",
+                [
+                    [
+                        Button("7 дней", callback="admin:statistics:7"),
+                        Button("30 дней", callback="admin:statistics:30"),
+                    ],
+                    [
+                        Button("90 дней", callback="admin:statistics:90"),
+                        Button("365 дней", callback="admin:statistics:365"),
+                    ],
+                    [Button("За всё время", callback="admin:statistics:all")],
+                    [Button("Панель", callback="admin:home")],
+                ],
+                content_key="admin.statistics.periods",
+                content_title="Статистика Excel: выбор периода",
+                content_category="admin",
+            ),
+        )
+
+    async def export_statistics(self, event: IncomingEvent, admin: dict[str, Any], period: str) -> None:
+        if not self._can_mutate(admin) or period not in {"7", "30", "90", "365", "all"}:
+            raise ValueError("Недостаточно прав или неизвестный период")
+        if self._statistics_lock.locked():
+            await self.send(event, OutgoingMessage("Другой отчёт ещё формируется. Повторите через минуту."))
+            return
+        async with self._statistics_lock:
+            await self.send(
+                event, OutgoingMessage("Формирую Excel со статистикой заявок. Файл появится в этом чате.")
+            )
+            now = datetime.now(self.settings.timezone)
+            from_date = (
+                None
+                if period == "all"
+                else (
+                    now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=int(period) - 1)
+                )
+                .astimezone(UTC)
+                .isoformat()
+            )
+            try:
+                payload = await self.site.request_statistics(from_date=from_date)
+                content = await asyncio.to_thread(
+                    build_statistics_workbook, payload, self.storage.list_admins(), self.settings.timezone
+                )
+                filename = f"request-statistics-{period}-{now:%Y%m%d-%H%M%S}.xlsx"
+                await self.messengers[event.platform].send_document(
+                    event.chat_id,
+                    filename,
+                    content,
+                    f"Статистика заявок «Маршрут построен»\nЗаявок: {payload['total']}. "
+                    "Пояснения к метрикам — на листе «Описание». Файл готов для анализа в ChatGPT.",
+                )
+            except SiteApiError as exc:
+                message = (
+                    "Сначала необходимо обновить API сайта для статистики."
+                    if exc.status_code == 404
+                    else "Не удалось получить статистику с сайта. Попробуйте позже или выберите меньший период."
+                )
+                await self.send(
+                    event,
+                    OutgoingMessage(message, [[Button("Повторить", callback=f"admin:statistics:{period}")]]),
+                )
+                return
+            except ValueError as exc:
+                await self.send(
+                    event,
+                    OutgoingMessage(safe(exc), [[Button("Выбрать период", callback="admin:statistics")]]),
+                )
+                return
+            except (httpx.HTTPError, RuntimeError):
+                await self.send(
+                    event,
+                    OutgoingMessage(
+                        "Не удалось отправить Excel-файл. Повторите выгрузку через минуту.",
+                        [[Button("Повторить", callback=f"admin:statistics:{period}")]],
+                    ),
+                )
+                return
+            self.storage.audit(
+                admin["id"],
+                "requests.statistics.exported",
+                "request",
+                details={"period": period, "requests": payload["total"], "platform": event.platform.value},
+            )
+            await self.send(
+                event,
+                OutgoingMessage(
+                    "Excel-файл отправлен выше.",
+                    [
+                        [
+                            Button("Другой период", callback="admin:statistics"),
+                            Button("Панель", callback="admin:home"),
+                        ]
+                    ],
+                ),
+            )
 
     async def show_blocked_users(self, event: IncomingEvent, admin: dict[str, Any]) -> None:
         if not self._can_mutate(admin):

@@ -33,6 +33,7 @@ class SiteClient:
         *,
         params: dict[str, Any] | None = None,
         body: dict[str, Any] | None = None,
+        timeout: float = 20.0,
     ) -> httpx.Response:
         raw = (
             json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode() if body is not None else b""
@@ -43,6 +44,7 @@ class SiteClient:
             params={key: value for key, value in (params or {}).items() if value not in {None, ""}},
             content=raw,
             headers={"Content-Type": "application/json"} if body is not None else None,
+            timeout=httpx.Timeout(timeout, connect=7.0),
         )
         timestamp = str(int(time.time()))
         content_hash = hashlib.sha256(raw).hexdigest()
@@ -77,8 +79,9 @@ class SiteClient:
         *,
         params: dict[str, Any] | None = None,
         body: dict[str, Any] | None = None,
+        timeout: float = 20.0,
     ) -> Any:
-        response = await self._send(method, path, params=params, body=body)
+        response = await self._send(method, path, params=params, body=body, timeout=timeout)
         return response.json() if response.content else None
 
     async def health(self) -> dict[str, Any]:
@@ -176,6 +179,11 @@ class SiteClient:
     async def export_requests(self) -> bytes:
         response = await self._send("GET", "/exports/requests.csv")
         return response.content
+
+    async def request_statistics(self, *, from_date: str | None = None) -> dict[str, Any]:
+        return await self._request(
+            "GET", "/exports/request-statistics", params={"from": from_date}, timeout=60.0
+        )
 
     async def close(self) -> None:
         await self._client.aclose()

@@ -65,3 +65,9 @@ class Messenger(ABC):
 
     @abstractmethod
     async def close(self) -> None: ...
+
+
+def document_mime_type(filename: str) -> str:
+    if filename.lower().endswith(".xlsx"):
+        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    return "text/csv" if filename.lower().endswith(".csv") else "application/octet-stream"

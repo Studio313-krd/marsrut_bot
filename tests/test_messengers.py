@@ -14,6 +14,49 @@ from app.messengers.max import MaxMessenger
 from app.messengers.telegram import TelegramMessenger
 
 
+@pytest.mark.asyncio
+@respx.mock
+async def test_telegram_sends_xlsx_document_with_correct_mime():
+    route = respx.post("https://api.telegram.org/bottoken/sendDocument").mock(
+        return_value=httpx.Response(200, json={"ok": True})
+    )
+    messenger = TelegramMessenger("token")
+    try:
+        await messenger.send_document("123", "statistics.xlsx", b"PK-test-xlsx", "Статистика")
+    finally:
+        await messenger.close()
+    assert (
+        b"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" in route.calls[0].request.content
+    )
+    assert b'filename="statistics.xlsx"' in route.calls[0].request.content
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_max_uploads_xlsx_and_sends_file_token_to_user():
+    respx.post("https://platform-api2.max.ru/uploads", params={"type": "file"}).mock(
+        return_value=httpx.Response(200, json={"url": "https://upload.example.test/file"})
+    )
+    uploaded = respx.post("https://upload.example.test/file").mock(
+        return_value=httpx.Response(200, json={"token": "file-token"})
+    )
+    sent = respx.post("https://platform-api2.max.ru/messages", params={"user_id": "321"}).mock(
+        return_value=httpx.Response(200, json={"message": {}})
+    )
+    messenger = MaxMessenger("token")
+    try:
+        await messenger.send_document("321", "statistics.xlsx", b"PK-test-xlsx", "Статистика")
+    finally:
+        await messenger.close()
+    assert (
+        b"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        in uploaded.calls[0].request.content
+    )
+    assert json.loads(sent.calls[0].request.content)["attachments"] == [
+        {"type": "file", "payload": {"token": "file-token"}}
+    ]
+
+
 def test_telegram_rejects_someone_elses_contact() -> None:
     messenger = TelegramMessenger("token")
     payload = {
